@@ -1,14 +1,20 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_csr_sequencer.svh
-// Description: CSR sequencer
-//----------------------------------------------------------------------
+// Description: APLC-Lite CSR sequencer
+// =============================================================================
 
 class aplc_csr_sequencer extends uvm_sequencer #(aplc_csr_txn);
 
-  `uvm_component_utils(aplc_csr_sequencer)
+    // -------------------------------------------------------------------------
+    // UVM factory registration
+    // -------------------------------------------------------------------------
+    `uvm_component_utils(aplc_csr_sequencer)
 
-  function new(string name, uvm_component parent);
-    super.new(name, parent);
-  endfunction
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction: new
 
-endclass
+endclass: aplc_csr_sequencer

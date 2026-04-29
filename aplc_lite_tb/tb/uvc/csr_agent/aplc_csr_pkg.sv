@@ -1,18 +1,24 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_csr_pkg.sv
-// Description: CSR agent package
-//----------------------------------------------------------------------
+// Description: APLC-Lite CSR agent package
+// =============================================================================
 
 package aplc_csr_pkg;
 
-  import uvm_pkg::*;
-  `include "uvm_macros.svh"
+    // -------------------------------------------------------------------------
+    // Include UVM macros and import UVM package
+    // -------------------------------------------------------------------------
+    `include "uvm_macros.svh"
+    import uvm_pkg::*;
 
-  `include "aplc_csr_txn.svh"
-  `include "aplc_csr_config.svh"
-  `include "aplc_csr_driver.svh"
-  `include "aplc_csr_monitor.svh"
-  `include "aplc_csr_sequencer.svh"
-  `include "aplc_csr_agent.svh"
+    // -------------------------------------------------------------------------
+    // Include CSR agent files
+    // -------------------------------------------------------------------------
+    `include "aplc_csr_txn.svh"
+    `include "aplc_csr_config.svh"
+    `include "aplc_csr_driver.svh"
+    `include "aplc_csr_monitor.svh"
+    `include "aplc_csr_sequencer.svh"
+    `include "aplc_csr_agent.svh"
 
-endpackage
+endpackage: aplc_csr_pkg

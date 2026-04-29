@@ -1,39 +1,44 @@
-// APLC-Lite TB File List
+// APLC-Lite Verification Filelist
+
+// RTL
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/APLC_LITE.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_TASKALLO.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_BANK.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_CAXIS.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_DPCHK.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_CCMD.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_SAXIS.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_SCTRL_FRONT.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_SCTRL_BACK.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_RXFIFO.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_TXFIFO.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_TPIPE.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_DPIPE.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_SAXIM.sv
+/home/xingchangchang/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/SLC_WBB.sv
+
 // Interfaces
-${APLC_TB_HOME}/tb/if/aplc_spi_if.sv
-${APLC_TB_HOME}/tb/if/aplc_ahb_if.sv
-${APLC_TB_HOME}/tb/if/aplc_csr_if.sv
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/if/aplc_spi_if.sv
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/if/aplc_ahb_if.sv
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/if/aplc_csr_if.sv
 
-// DUT RTL
-${APLC_RTL_HOME}/SLC_CAXIS.sv
-${APLC_RTL_HOME}/SLC_RXFIFO.sv
-${APLC_RTL_HOME}/SLC_DPCHK.sv
-${APLC_RTL_HOME}/SLC_CCMD.sv
-${APLC_RTL_HOME}/SLC_SCTRL_FRONT.sv
-${APLC_RTL_HOME}/SLC_TXFIFO.sv
-${APLC_RTL_HOME}/SLC_SAXIS.sv
-${APLC_RTL_HOME}/SLC_TASKALLO.sv
-${APLC_RTL_HOME}/SLC_TPIPE.sv
-${APLC_RTL_HOME}/SLC_DPIPE.sv
-${APLC_RTL_HOME}/SLC_SAXIM.sv
-${APLC_RTL_HOME}/SLC_WBB.sv
-${APLC_RTL_HOME}/SLC_SCTRL_BACK.sv
-${APLC_RTL_HOME}/SLC_BANK.sv
-${APLC_RTL_HOME}/APLC_LITE.sv
+// SPI Agent Package
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/uvc/spi_agent/aplc_spi_pkg.sv
 
-// Agent packages
-${APLC_TB_HOME}/tb/uvc/spi_agent/aplc_spi_pkg.sv
-${APLC_TB_HOME}/tb/uvc/ahb_agent/aplc_ahb_pkg.sv
-${APLC_TB_HOME}/tb/uvc/csr_agent/aplc_csr_pkg.sv
+// AHB Agent Package
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/uvc/ahb_agent/aplc_ahb_pkg.sv
 
-// Environment package
-${APLC_TB_HOME}/tb/env/aplc_env_pkg.sv
+// CSR Agent Package
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/uvc/csr_agent/aplc_csr_pkg.sv
 
-// Sequence package
-${APLC_TB_HOME}/seq/aplc_seq_pkg.sv
+// Environment Package
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/env/aplc_env_pkg.sv
 
-// Test package
-${APLC_TB_HOME}/tc/aplc_test_pkg.sv
+// Sequence Package
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/seq/aplc_seq_pkg.sv
 
-// Testbench top
-${APLC_TB_HOME}/tb/aplc_tb_top.sv
+// Test Package
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tc/aplc_test_pkg.sv
+
+// Top-level Testbench
+/home/xingchangchang/ai_evaluation/claude_code/spec2tb/spec2tb_skills/aplc_lite_tb/tb/aplc_tb_top.sv

@@ -1,32 +1,28 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_ahb_config.svh
-// Description: AHB-Lite agent configuration object
-//----------------------------------------------------------------------
+// Description: APLC-Lite AHB agent configuration class
+// =============================================================================
 
 class aplc_ahb_config extends uvm_object;
 
-  `uvm_object_utils(aplc_ahb_config)
+    // -------------------------------------------------------------------------
+    // Configuration fields
+    // -------------------------------------------------------------------------
+    virtual aplc_ahb_if              m_vif;
+    uvm_active_passive_enum         m_is_active   = UVM_ACTIVE;
+    int                             m_ready_delay = 0;
+    bit                             m_has_coverage = 1;
 
-  // Virtual interface
-  virtual aplc_ahb_if m_vif;
+    // -------------------------------------------------------------------------
+    // UVM factory registration
+    // -------------------------------------------------------------------------
+    `uvm_object_utils(aplc_ahb_config)
 
-  // Active/passive mode
-  bit is_active = UVM_ACTIVE;
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name = "aplc_ahb_config");
+        super.new(name);
+    endfunction: new
 
-  // Enable monitor
-  bit has_monitor = 1;
-
-  // Default delay for hready (0 = no delay)
-  int default_delay = 0;
-
-  // Error injection enable
-  bit error_inject = 0;
-
-  // Beat index on which to inject error (0-based)
-  int error_beat_idx = -1;
-
-  function new(string name = "aplc_ahb_config");
-    super.new(name);
-  endfunction
-
-endclass
+endclass: aplc_ahb_config

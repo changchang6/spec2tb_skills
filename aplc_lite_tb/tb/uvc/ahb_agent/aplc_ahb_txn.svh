@@ -1,156 +1,169 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_ahb_txn.svh
-// Description: AHB-Lite transaction object
-//----------------------------------------------------------------------
+// Description: APLC-Lite AHB transaction class
+// =============================================================================
 
 class aplc_ahb_txn extends uvm_sequence_item;
 
-  `uvm_object_utils(aplc_ahb_txn)
+    // -------------------------------------------------------------------------
+    // Transaction fields
+    // -------------------------------------------------------------------------
+    rand bit [31:0] m_addr;
+    rand bit [31:0] m_data[];
+    rand bit        m_write;
+    rand bit [2:0]  m_size;
+    rand bit [2:0]  m_burst;
+    rand bit [1:0]  m_trans;
+    rand bit        m_response;  // 0=OKAY, 1=ERROR
 
-  // AHB address
-  rand bit [31:0] addr;
+    // -------------------------------------------------------------------------
+    // Burst type constants
+    // -------------------------------------------------------------------------
+    localparam BT_SINGLE = 3'b000;
+    localparam BT_INCR4  = 3'b011;
+    localparam BT_INCR8  = 3'b101;
+    localparam BT_INCR16 = 3'b111;
 
-  // Data payload (dynamic array to support burst)
-  rand bit [31:0] data[];
+    // -------------------------------------------------------------------------
+    // Transfer type constants
+    // -------------------------------------------------------------------------
+    localparam TT_IDLE   = 2'b00;
+    localparam TT_NONSEQ = 2'b10;
+    localparam TT_SEQ    = 2'b11;
 
-  // Transfer direction: 1=write, 0=read
-  rand bit write;
+    // -------------------------------------------------------------------------
+    // UVM factory registration
+    // -------------------------------------------------------------------------
+    `uvm_object_utils(aplc_ahb_txn)
 
-  // Transfer size: 3'b010 = WORD (32-bit)
-  rand bit [2:0] size;
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name = "aplc_ahb_txn");
+        super.new(name);
+    endfunction: new
 
-  // Burst type
-  rand bit [2:0] burst;
+    // -------------------------------------------------------------------------
+    // Constraint: default burst length based on burst type
+    // -------------------------------------------------------------------------
+    constraint c_burst_len {
+        m_data.size() inside {[1:16]};
+        if (m_burst == BT_SINGLE) {
+            m_data.size() == 1;
+        } else if (m_burst == BT_INCR4) {
+            m_data.size() == 4;
+        } else if (m_burst == BT_INCR8) {
+            m_data.size() == 8;
+        } else if (m_burst == BT_INCR16) {
+            m_data.size() == 16;
+        }
+    }
 
-  // Transfer type
-  rand bit [1:0] trans;
+    // -------------------------------------------------------------------------
+    // Constraint: hsize is always WORD
+    // -------------------------------------------------------------------------
+    constraint c_size_word {
+        m_size == 3'b010;
+    }
 
-  // Response: 0=OKAY, 1=ERROR
-  rand bit [1:0] response;
+    // -------------------------------------------------------------------------
+    // Constraint: address must be word-aligned
+    // -------------------------------------------------------------------------
+    constraint c_addr_aligned {
+        m_addr[1:0] == 2'b00;
+    }
 
-  // Burst length (number of beats)
-  rand int burst_len;
+    // -------------------------------------------------------------------------
+    // convert2string
+    // -------------------------------------------------------------------------
+    function string convert2string();
+        string s;
+        string burst_str;
+        string trans_str;
+        string resp_str;
 
-  // Current beat index within burst
-  rand int beat_idx;
+        case (m_burst)
+            3'b000: burst_str = "SINGLE";
+            3'b011: burst_str = "INCR4";
+            3'b101: burst_str = "INCR8";
+            3'b111: burst_str = "INCR16";
+            default: burst_str = $sformatf("0x%0h", m_burst);
+        endcase
 
-  // Constants for htrans
-  localparam bit [1:0] HTYPE_IDLE   = 2'b00;
-  localparam bit [1:0] HTYPE_BUSY   = 2'b01;
-  localparam bit [1:0] HTYPE_NONSEQ = 2'b10;
-  localparam bit [1:0] HTYPE_SEQ    = 2'b11;
+        case (m_trans)
+            2'b00: trans_str = "IDLE";
+            2'b10: trans_str = "NONSEQ";
+            2'b11: trans_str = "SEQ";
+            default: trans_str = $sformatf("0x%0h", m_trans);
+        endcase
 
-  // Constants for hburst
-  localparam bit [2:0] HBURST_SINGLE = 3'b000;
-  localparam bit [2:0] HBURST_INCR4  = 3'b011;
-  localparam bit [2:0] HBURST_INCR8  = 3'b101;
-  localparam bit [2:0] HBURST_INCR16 = 3'b111;
+        resp_str = (m_response == 0) ? "OKAY" : "ERROR";
 
-  // Constants for hresp
-  localparam bit [1:0] HRESP_OKAY  = 2'b00;
-  localparam bit [1:0] HRESP_ERROR = 2'b01;
+        s = $sformatf("addr=0x%08h write=%0s burst=%0s trans=%0s resp=%0s size=%0d data[0]=0x%08h",
+                       m_addr,
+                       m_write ? "WR" : "RD",
+                       burst_str,
+                       trans_str,
+                       resp_str,
+                       m_data.size(),
+                       (m_data.size() > 0) ? m_data[0] : 32'h0);
+        return s;
+    endfunction: convert2string
 
-  // Constraints
-  constraint c_size { size == 3'b010; } // WORD only
-  constraint c_data_size { data.size() == burst_len; }
-  constraint c_burst_len {
-    (burst == HBURST_SINGLE) -> burst_len == 1;
-    (burst == HBURST_INCR4)  -> burst_len == 4;
-    (burst == HBURST_INCR8)  -> burst_len == 8;
-    (burst == HBURST_INCR16) -> burst_len == 16;
-  }
-  constraint c_burst_valid {
-    burst inside {HBURST_SINGLE, HBURST_INCR4, HBURST_INCR8, HBURST_INCR16};
-  }
-  constraint c_trans_valid { trans inside {HTYPE_IDLE, HTYPE_NONSEQ, HTYPE_SEQ}; }
-  constraint c_beat_idx { beat_idx >= 0 && beat_idx < burst_len; }
-  constraint c_response { response inside {HRESP_OKAY, HRESP_ERROR}; }
+    // -------------------------------------------------------------------------
+    // do_copy
+    // -------------------------------------------------------------------------
+    function void do_copy(uvm_object rhs);
+        aplc_ahb_txn rhs_txn;
 
-  function new(string name = "aplc_ahb_txn");
-    super.new(name);
-  endfunction
+        if (!$cast(rhs_txn, rhs)) begin
+            `uvm_fatal("APLC_AHB_TXN", "do_copy: cast failed")
+        end
 
-  virtual function string convert2string();
-    string s;
-    s = $sformatf("addr=0x%08h write=%0b size=%0b burst=%0b trans=%0b response=%0b burst_len=%0d beat_idx=%0d",
-                  addr, write, size, burst, trans, response, burst_len, beat_idx);
-    foreach (data[i]) begin
-      s = {s, $sformatf("\n  data[%0d]=0x%08h", i, data[i])};
-    end
-    return s;
-  endfunction
+        super.do_copy(rhs);
+        m_addr     = rhs_txn.m_addr;
+        m_write    = rhs_txn.m_write;
+        m_size     = rhs_txn.m_size;
+        m_burst    = rhs_txn.m_burst;
+        m_trans    = rhs_txn.m_trans;
+        m_response = rhs_txn.m_response;
+        m_data     = rhs_txn.m_data;
+    endfunction: do_copy
 
-  virtual function void do_copy(uvm_object rhs);
-    aplc_ahb_txn rhs_;
+    // -------------------------------------------------------------------------
+    // do_compare
+    // -------------------------------------------------------------------------
+    function bit do_compare(uvm_object rhs, uvm_comparer comparer);
+        aplc_ahb_txn rhs_txn;
 
-    if (!$cast(rhs_, rhs)) begin
-      `uvm_fatal("DO_COPY", "cast failed in do_copy")
-    end
-    super.do_copy(rhs);
-    addr      = rhs_.addr;
-    write     = rhs_.write;
-    size      = rhs_.size;
-    burst     = rhs_.burst;
-    trans     = rhs_.trans;
-    response  = rhs_.response;
-    burst_len = rhs_.burst_len;
-    beat_idx  = rhs_.beat_idx;
-    data      = new[rhs_.data.size()];
-    foreach (data[i]) begin
-      data[i] = rhs_.data[i];
-    end
-  endfunction
+        if (!$cast(rhs_txn, rhs)) begin
+            `uvm_fatal("APLC_AHB_TXN", "do_compare: cast failed")
+        end
 
-  virtual function bit do_compare(uvm_object rhs, uvm_comparer comparer);
-    aplc_ahb_txn rhs_;
+        do_compare = super.do_compare(rhs, comparer) &&
+                     (m_addr     === rhs_txn.m_addr) &&
+                     (m_write    === rhs_txn.m_write) &&
+                     (m_size     === rhs_txn.m_size) &&
+                     (m_burst    === rhs_txn.m_burst) &&
+                     (m_trans    === rhs_txn.m_trans) &&
+                     (m_response === rhs_txn.m_response) &&
+                     (m_data     === rhs_txn.m_data);
+    endfunction: do_compare
 
-    if (!$cast(rhs_, rhs)) begin
-      `uvm_fatal("DO_COMPARE", "cast failed in do_compare")
-      return 0;
-    end
-    if (data.size() != rhs_.data.size()) return 0;
-    foreach (data[i]) begin
-      if (data[i] !== rhs_.data[i]) return 0;
-    end
-    do_compare = (super.do_compare(rhs, comparer) &&
-                  addr      === rhs_.addr &&
-                  write     === rhs_.write &&
-                  size      === rhs_.size &&
-                  burst     === rhs_.burst &&
-                  trans     === rhs_.trans &&
-                  response  === rhs_.response &&
-                  burst_len === rhs_.burst_len &&
-                  beat_idx  === rhs_.beat_idx);
-  endfunction
+    // -------------------------------------------------------------------------
+    // do_print
+    // -------------------------------------------------------------------------
+    function void do_print(uvm_printer printer);
+        super.do_print(printer);
+        printer.print_field("m_addr",     m_addr,     32, UVM_HEX);
+        printer.print_field("m_write",    m_write,     1, UVM_BIN);
+        printer.print_field("m_size",     m_size,      3, UVM_BIN);
+        printer.print_field("m_burst",    m_burst,     3, UVM_BIN);
+        printer.print_field("m_trans",    m_trans,     2, UVM_BIN);
+        printer.print_field("m_response", m_response,  1, UVM_BIN);
+        foreach (m_data[i]) begin
+            printer.print_field($sformatf("m_data[%0d]", i), m_data[i], 32, UVM_HEX);
+        end
+    endfunction: do_print
 
-  virtual function void do_print(uvm_printer printer);
-    super.do_print(printer);
-    printer.print_field("addr",      addr,      32, UVM_HEX);
-    printer.print_field("write",     write,      1, UVM_BIN);
-    printer.print_field("size",      size,       3, UVM_BIN);
-    printer.print_field("burst",     burst,      3, UVM_BIN);
-    printer.print_field("trans",     trans,      2, UVM_BIN);
-    printer.print_field("response",  response,   2, UVM_BIN);
-    printer.print_int("burst_len",  burst_len,  32, UVM_DEC);
-    printer.print_int("beat_idx",   beat_idx,   32, UVM_DEC);
-    foreach (data[i]) begin
-      printer.print_field($sformatf("data[%0d]", i), data[i], 32, UVM_HEX);
-    end
-  endfunction
-
-  virtual function void do_record(uvm_recorder recorder);
-    super.do_record(recorder);
-    recorder.record_field("addr",     addr,     32, UVM_HEX);
-    recorder.record_field("write",    write,     1, UVM_BIN);
-    recorder.record_field("size",     size,      3, UVM_BIN);
-    recorder.record_field("burst",    burst,     3, UVM_BIN);
-    recorder.record_field("trans",    trans,     2, UVM_BIN);
-    recorder.record_field("response", response,  2, UVM_BIN);
-    recorder.record_field("burst_len", burst_len, 32, UVM_DEC);
-    recorder.record_field("beat_idx",  beat_idx,  32, UVM_DEC);
-    foreach (data[i]) begin
-      recorder.record_field($sformatf("data[%0d]", i), data[i], 32, UVM_HEX);
-    end
-  endfunction
-
-endclass
+endclass: aplc_ahb_txn

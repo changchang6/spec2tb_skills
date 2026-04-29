@@ -1,355 +1,265 @@
-// ----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_spi_driver.svh
-// Description: SPI-like Agent Driver for APLC-Lite UVM testbench
-//              Uses half-duplex serial protocol with lane_mode support
-//              Drives: pcs_n_i, pdi_i[15:0]
-//              Observes: pdo_o[15:0], pdo_oe_o
-// ----------------------------------------------------------------------
+// Description: APLC-Lite SPI driver - drives request frames and collects
+//              responses via the SPI-like half-duplex interface
+// =============================================================================
 
 class aplc_spi_driver extends uvm_driver #(aplc_spi_txn);
 
-  // --- Virtual interface ---
-  virtual aplc_spi_if m_vif;
+    // -------------------------------------------------------------------------
+    // Utility and registration
+    // -------------------------------------------------------------------------
+    `uvm_component_utils(aplc_spi_driver)
 
-  // --- Configuration ---
-  aplc_spi_config m_cfg;
+    // -------------------------------------------------------------------------
+    // Member variables
+    // -------------------------------------------------------------------------
+    virtual aplc_spi_if             m_vif;
+    uvm_active_passive_enum         m_is_active;
 
-  // --- Opcode constants ---
-  localparam bit [7:0] OPC_WR_CSR       = 8'h10;
-  localparam bit [7:0] OPC_RD_CSR       = 8'h11;
-  localparam bit [7:0] OPC_AHB_WR32     = 8'h20;
-  localparam bit [7:0] OPC_AHB_RD32     = 8'h21;
-  localparam bit [7:0] OPC_AHB_WR_BURST = 8'h22;
-  localparam bit [7:0] OPC_AHB_RD_BURST = 8'h23;
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction: new
 
-  // --- Constructor ---
-  function new(string name, uvm_component parent);
-    super.new(name, parent);
-  endfunction : new
+    // -------------------------------------------------------------------------
+    // build_phase
+    // -------------------------------------------------------------------------
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
 
-  // --- Factory registration ---
-  `uvm_component_utils(aplc_spi_driver)
-
-  // --- Build phase ---
-  virtual function void build_phase(uvm_phase phase);
-    super.build_phase(phase);
-    if (!uvm_config_db #(aplc_spi_config)::get(this, "", "aplc_spi_config", m_cfg)) begin
-      `uvm_fatal("BUILD_ERR", "Unable to get aplc_spi_config from config_db")
-    end
-    m_vif = m_cfg.m_vif;
-  endfunction : build_phase
-
-  // --- Run phase ---
-  virtual task run_phase(uvm_phase phase);
-    // Initialize interface signals: idle state
-    m_vif.pcs_n_i   <= 1'b1;
-    m_vif.pdi_i     <= '0;
-    m_vif.en_i      <= 1'b1;
-    m_vif.test_mode_i <= 1'b1;
-    m_vif.lane_mode_i <= 2'b00;
-
-    // Wait for reset to deassert before driving any transactions
-    wait (m_vif.rst_n === 1'b1);
-    @(m_vif.cb);
-
-    forever begin
-      seq_item_port.try_next_item(req);
-      if (req != null) begin
-        drive_transaction(req);
-        seq_item_port.item_done();
-      end else begin
-        @(m_vif.cb);
-      end
-    end
-  endtask : run_phase
-
-  // ---------------------------------------------------------------
-  // drive_transaction : Top-level task to drive a full transaction
-  // ---------------------------------------------------------------
-  virtual task drive_transaction(aplc_spi_txn txn);
-    drive_request(txn);
-    if (txn.has_rdata) begin
-      // Read commands expect status + rdata response
-      drive_turnaround();
-      capture_response(txn);
-    end else begin
-      // Write commands expect status-only response
-      drive_turnaround();
-      capture_status_only(txn);
-    end
-  endtask : drive_transaction
-
-  // ---------------------------------------------------------------
-  // drive_request : Shift out the request frame MSB-first
-  // ---------------------------------------------------------------
-  virtual task drive_request(aplc_spi_txn txn);
-    logic [511:0] frame_data;
-    int           frame_bits;
-    int           bits_per_cycle;
-
-    // Determine bits per cycle from lane_mode
-    bits_per_cycle = get_bits_per_cycle(txn.lane_mode);
-
-    // Build the request frame
-    build_request_frame(txn, frame_bits, frame_data);
-
-    // Set lane_mode and assert pcs_n_i to start frame
-    // Drive pcs_n_i and first data word in the same cycle so DUT captures
-    // valid data on the very first clock edge it sees pcs_n_i low
-    m_vif.lane_mode_i <= txn.lane_mode;
-    m_vif.pcs_n_i     <= 1'b0;
-
-    // Shift out frame data MSB-first (first word driven immediately)
-    send_frame(frame_data, frame_bits, bits_per_cycle);
-
-    // De-assert pcs_n_i to end frame
-    m_vif.pcs_n_i <= 1'b1;
-    m_vif.pdi_i   <= '0;
-    @(m_vif.cb);
-  endtask : drive_request
-
-  // ---------------------------------------------------------------
-  // build_request_frame : Construct the request bit-stream
-  //   Frame data is left-aligned at bit 511 (MSB)
-  //   frame_bits returns the total number of valid bits
-  // ---------------------------------------------------------------
-  virtual function void build_request_frame(aplc_spi_txn txn,
-                                            output int frame_bits,
-                                            output logic [511:0] frame);
-    int bit_pos;
-
-    frame   = '0;
-    bit_pos = 0;
-
-    // Opcode is always first 8 bits at MSB
-    frame[511 -: 8] = txn.opcode;
-    bit_pos = 8;
-
-    case (txn.opcode)
-      OPC_WR_CSR: begin
-        // [opcode(8) | reg_addr(8) | wdata(32)] = 48 bits
-        frame[(511-8) -: 8]   = txn.reg_addr;
-        bit_pos = 16;
-        frame[(511-16) -: 32] = txn.wdata[0];
-        bit_pos = 48;
-      end
-
-      OPC_RD_CSR: begin
-        // [opcode(8) | reg_addr(8)] = 16 bits
-        frame[(511-8) -: 8] = txn.reg_addr;
-        bit_pos = 16;
-      end
-
-      OPC_AHB_WR32: begin
-        // [opcode(8) | addr(32) | wdata(32)] = 72 bits
-        frame[(511-8) -: 32]  = txn.addr;
-        bit_pos = 40;
-        frame[(511-40) -: 32] = txn.wdata[0];
-        bit_pos = 72;
-      end
-
-      OPC_AHB_RD32: begin
-        // [opcode(8) | addr(32)] = 40 bits
-        frame[(511-8) -: 32] = txn.addr;
-        bit_pos = 40;
-      end
-
-      OPC_AHB_WR_BURST: begin
-        // [opcode(8) | burst_len(5) | rsvd(3) | addr(32) | wdata*N(32)]
-        frame[(511-8) -: 5]   = txn.burst_len;
-        frame[(511-13) -: 3]  = 3'b000;
-        bit_pos = 16;
-        frame[(511-16) -: 32] = txn.addr;
-        bit_pos = 48;
-        for (int i = 0; i < txn.wdata.size(); i++) begin
-          frame[(511-bit_pos) -: 32] = txn.wdata[i];
-          bit_pos = bit_pos + 32;
+        if (!uvm_config_db #(virtual aplc_spi_if)::get(this, "", "m_vif", m_vif)) begin
+            `uvm_fatal(get_type_name(), "Failed to get m_vif from config db")
         end
-      end
+    endfunction: build_phase
 
-      OPC_AHB_RD_BURST: begin
-        // [opcode(8) | burst_len(5) | rsvd(3) | addr(32)] = 48 bits
-        frame[(511-8) -: 5]   = txn.burst_len;
-        frame[(511-13) -: 3]  = 3'b000;
-        bit_pos = 16;
-        frame[(511-16) -: 32] = txn.addr;
-        bit_pos = 48;
-      end
+    // -------------------------------------------------------------------------
+    // get_bits_per_beat - return number of data bits per clock cycle
+    // -------------------------------------------------------------------------
+    function int unsigned get_bits_per_beat(input bit [1:0] lane_mode);
+        case (lane_mode)
+            2'b00: return 1;
+            2'b01: return 4;
+            2'b10: return 8;
+            2'b11: return 16;
+            default: return 1;
+        endcase
+    endfunction: get_bits_per_beat
 
-      default: begin
-        `uvm_error("DRIVE", $sformatf("Unknown opcode: 0x%02h", txn.opcode))
-      end
-    endcase
+    // -------------------------------------------------------------------------
+    // run_phase - main driver loop
+    // -------------------------------------------------------------------------
+    task run_phase(uvm_phase phase);
+        // Initialize interface to idle
+        m_vif.drive_idle();
 
-    frame_bits = bit_pos;
-  endfunction : build_request_frame
+        // Wait for reset deassertion before driving
+        wait (m_vif.rst_n === 1'b1);
+        @(m_vif.drv_cb);
 
-  // ---------------------------------------------------------------
-  // send_frame : Shift out bits according to lane_mode
-  //   DUT CAXIS concatenates pdi_i at the LSB of its shift register,
-  //   so the first byte of each 16-bit word must be in pdi_i[7:0].
-  //   For 1/4/8-bit modes the existing MSB-first mapping is correct.
-  //   For 16-bit mode, byte-swap each word so the earlier byte
-  //   occupies the lower 8 bits.
-  // ---------------------------------------------------------------
-  virtual task send_frame(logic [511:0] frame_data, int frame_bits, int bits_per_cycle);
-    int remaining_bits;
-    int shift_idx;
-    logic [15:0] data_out;
+        forever begin
+            seq_item_port.try_next_item(req);
+            if (req != null) begin
+                drive_transaction(req);
+                seq_item_port.item_done();
+            end else begin
+                @(m_vif.drv_cb);
+            end
+        end
+    endtask: run_phase
 
-    remaining_bits = frame_bits;
-    shift_idx      = 511; // MSB position in the packed array
+    // -------------------------------------------------------------------------
+    // drive_transaction - top-level driving task
+    //   Drives pcs_n and the first data beat in the same clock cycle so the
+    //   DUT sees both together on the next posedge (avoids a zero-data gap).
+    // -------------------------------------------------------------------------
+    task drive_transaction(aplc_spi_txn txn);
+        `uvm_info(get_type_name(), $sformatf("Driving transaction: %s", txn.convert2string()), UVM_HIGH)
 
-    while (remaining_bits > 0) begin
-      int bits_this_cycle;
-      bits_this_cycle = (remaining_bits < bits_per_cycle) ? remaining_bits : bits_per_cycle;
+        // Assert pcs_n (active-low) and set up interface - drive in same
+        // time step as first data beat so DUT sees both together.
+        m_vif.drv_cb.pcs_n     <= 1'b0;
+        m_vif.drv_cb.lane_mode <= txn.m_lane_mode;
+        m_vif.drv_cb.en        <= 1'b1;
+        m_vif.drv_cb.test_mode <= 1'b1;
 
-      // Build pdi_i value: MSB-first in the active lane positions
-      data_out = '0;
-      for (int b = 0; b < bits_this_cycle; b++) begin
-        data_out[bits_per_cycle - 1 - b] = frame_data[shift_idx - b];
-      end
+        // Drive the request phase based on opcode (first beat shares
+        // the same clock edge as pcs_n assertion)
+        case (txn.m_opcode)
+            8'h10: drive_wr_csr(txn);
+            8'h11: drive_rd_csr(txn);
+            8'h20: drive_ahb_wr32(txn);
+            8'h21: drive_ahb_rd32(txn);
+            8'h22: drive_ahb_wr_burst(txn);
+            8'h23: drive_ahb_rd_burst(txn);
+            default: begin
+                `uvm_error(get_type_name(), $sformatf("Unknown opcode: 0x%02h", txn.m_opcode))
+            end
+        endcase
 
-      // For 16-bit mode, swap bytes so first byte goes to pdi_i[7:0]
-      // This matches DUT CAXIS convention where lower bits are earlier data
-      if (bits_per_cycle == 16 && bits_this_cycle == 16) begin
-        data_out = {data_out[7:0], data_out[15:8]};
-      end
+        // Collect response from DUT
+        collect_response(txn);
 
-      m_vif.pdi_i <= data_out;
-      @(m_vif.cb);
+        // Wait for DUT to finish driving response before deasserting pcs_n
+        wait (m_vif.pdo_oe === 1'b0);
 
-      shift_idx      = shift_idx - bits_this_cycle;
-      remaining_bits = remaining_bits - bits_this_cycle;
-    end
-  endtask : send_frame
+        // Deassert pcs_n to end frame
+        m_vif.drv_cb.pcs_n <= 1'b1;
+        m_vif.drv_cb.pdi   <= 16'h0;
+        @(m_vif.drv_cb);
+        // Extra idle cycle to allow monitor resynchronization
+        @(m_vif.drv_cb);
 
-  // ---------------------------------------------------------------
-  // drive_turnaround : 1-cycle turnaround between request/response
-  //   During turnaround, ATE stops driving (pdi_i = 0)
-  // ---------------------------------------------------------------
-  virtual task drive_turnaround();
-    m_vif.pdi_i <= '0;
-    @(m_vif.cb);
-  endtask : drive_turnaround
+        `uvm_info(get_type_name(), $sformatf("Transaction complete: %s", txn.convert2string()), UVM_HIGH)
+    endtask: drive_transaction
 
-  // ---------------------------------------------------------------
-  // capture_response : Capture status + rdata from DUT response
-  //   Used for read transactions (RD_CSR, AHB_RD32, AHB_RD_BURST)
-  // ---------------------------------------------------------------
-  virtual task capture_response(aplc_spi_txn txn);
-    logic [7:0]   status_val;
-    int           bits_per_cycle;
-    int           total_response_bits;
-    logic [511:0] resp_data;
-    int           resp_bit_idx;
-    int           bits_this_cycle;
-    int           num_words;
+    // -------------------------------------------------------------------------
+    // drive_data_msb_first - drive data bits MSB-first across lane_mode
+    //   Convention: MSB of data goes to highest bit of pdi
+    //     lane_mode 00: pdi[0] carries the bit
+    //     lane_mode 01: pdi[3:0] carries 4 bits, pdi[3]=MSB
+    //     lane_mode 10: pdi[7:0] carries 8 bits, pdi[7]=MSB
+    //     lane_mode 11: pdi[15:0] carries 16 bits, pdi[15]=MSB
+    // -------------------------------------------------------------------------
+    task drive_data_msb_first(input bit [1:0] lane_mode,
+                              input logic [127:0] data,
+                              input int unsigned num_bits);
+        int unsigned bits_per_beat;
+        int unsigned num_beats;
+        int unsigned beat_idx;
+        int unsigned bit_idx;
+        logic [15:0] beat_data;
 
-    bits_per_cycle = get_bits_per_cycle(txn.lane_mode);
+        bits_per_beat = get_bits_per_beat(lane_mode);
+        num_beats     = (num_bits + bits_per_beat - 1) / bits_per_beat;
 
-    // Wait for DUT to start driving (pdo_oe_o = 1)
-    wait (m_vif.pdo_oe_o === 1'b1);
-    @(m_vif.cb);
+        for (beat_idx = 0; beat_idx < num_beats; beat_idx++) begin
+            beat_data = 16'h0;
 
-    // Determine total response bits
-    case (txn.opcode)
-      OPC_RD_CSR:       total_response_bits = 8 + 32; // status + rdata
-      OPC_AHB_RD32:     total_response_bits = 8 + 32;
-      OPC_AHB_RD_BURST: total_response_bits = 8 + 32 * txn.burst_len;
-      default:          total_response_bits = 8; // fallback
-    endcase
+            // Extract bits for this beat, MSB-first
+            // MSB of data goes to highest bit of pdi (pdi[N-1]=MSB convention)
+            for (int lane = 0; lane < bits_per_beat; lane++) begin
+                bit_idx = num_bits - 1 - (beat_idx * bits_per_beat) - lane;
+                if (bit_idx >= 0 && bit_idx < num_bits) begin
+                    beat_data[bits_per_beat - 1 - lane] = data[bit_idx];
+                end
+            end
 
-    // Capture response bits MSB-first
-    resp_data    = '0;
-    resp_bit_idx = 511;
+            m_vif.drv_cb.pdi <= beat_data;
+            @(m_vif.drv_cb);
+        end
+    endtask: drive_data_msb_first
 
-    begin : capture_resp_loop
-      int captured;
-      captured = 0;
-      while (captured < total_response_bits) begin
-        bits_this_cycle = ((total_response_bits - captured) < bits_per_cycle) ?
-                           (total_response_bits - captured) : bits_per_cycle;
+    // -------------------------------------------------------------------------
+    // Command-specific drive tasks
+    // -------------------------------------------------------------------------
 
-        // Read from pdo_o, MSB-first in active lane positions
-        for (int b = 0; b < bits_this_cycle; b++) begin
-          resp_data[resp_bit_idx - b] = m_vif.pdo_o[bits_per_cycle - 1 - b];
+    // WR_CSR(0x10): [opcode(8) | reg_addr(8) | wdata(32)] = 48-bit request
+    task drive_wr_csr(aplc_spi_txn txn);
+        drive_data_msb_first(txn.m_lane_mode, {txn.m_opcode, txn.m_reg_addr, txn.m_wdata[0]}, 48);
+    endtask: drive_wr_csr
+
+    // RD_CSR(0x11): [opcode(8) | reg_addr(8)] = 16-bit request
+    task drive_rd_csr(aplc_spi_txn txn);
+        drive_data_msb_first(txn.m_lane_mode, {txn.m_opcode, txn.m_reg_addr}, 16);
+    endtask: drive_rd_csr
+
+    // AHB_WR32(0x20): [opcode(8) | addr(32) | wdata(32)] = 72-bit request
+    task drive_ahb_wr32(aplc_spi_txn txn);
+        drive_data_msb_first(txn.m_lane_mode, {txn.m_opcode, txn.m_addr, txn.m_wdata[0]}, 72);
+    endtask: drive_ahb_wr32
+
+    // AHB_RD32(0x21): [opcode(8) | addr(32)] = 40-bit request
+    task drive_ahb_rd32(aplc_spi_txn txn);
+        drive_data_msb_first(txn.m_lane_mode, {txn.m_opcode, txn.m_addr}, 40);
+    endtask: drive_ahb_rd32
+
+    // AHB_WR_BURST(0x22): [opcode(8)|burst_len(5)|rsvd(3)|addr(32)|wdata*N]
+    task drive_ahb_wr_burst(aplc_spi_txn txn);
+        // Drive header: opcode(8) + burst_len(5) + rsvd(3) + addr(32) = 48 bits
+        drive_data_msb_first(txn.m_lane_mode, {txn.m_opcode, txn.m_burst_len, 3'b000, txn.m_addr}, 48);
+
+        // Drive payload: N x 32-bit data words
+        for (int i = 0; i < txn.m_wdata.size(); i++) begin
+            drive_data_msb_first(txn.m_lane_mode, txn.m_wdata[i], 32);
+        end
+    endtask: drive_ahb_wr_burst
+
+    // AHB_RD_BURST(0x23): [opcode(8)|burst_len(5)|rsvd(3)|addr(32)] = 48-bit request
+    task drive_ahb_rd_burst(aplc_spi_txn txn);
+        drive_data_msb_first(txn.m_lane_mode, {txn.m_opcode, txn.m_burst_len, 3'b000, txn.m_addr}, 48);
+    endtask: drive_ahb_rd_burst
+
+    // -------------------------------------------------------------------------
+    // collect_response - monitor DUT response after request
+    // -------------------------------------------------------------------------
+    task collect_response(aplc_spi_txn txn);
+        // Wait for turnaround cycle (pdo_oe transitions to 1)
+        // The DUT asserts pdo_oe when it starts driving the response
+        wait (m_vif.pdo_oe === 1'b1);
+        @(m_vif.mon_cb);
+
+        // Collect status byte (8 bits) - always first response
+        collect_response_data(txn.m_lane_mode, 8, txn.m_status);
+
+        // Collect read data based on command type
+        if (txn.m_opcode == 8'h11) begin
+            // RD_CSR: status(8) + rdata(32)
+            txn.m_rdata = new[1];
+            collect_response_data(txn.m_lane_mode, 32, txn.m_rdata[0]);
+        end
+        else if (txn.m_opcode == 8'h21) begin
+            // AHB_RD32: status(8) + rdata(32)
+            txn.m_rdata = new[1];
+            collect_response_data(txn.m_lane_mode, 32, txn.m_rdata[0]);
+        end
+        else if (txn.m_opcode == 8'h23) begin
+            // AHB_RD_BURST: status(8) + N*32-bit rdata
+            txn.m_rdata = new[txn.m_burst_len];
+            for (int i = 0; i < txn.m_burst_len; i++) begin
+                collect_response_data(txn.m_lane_mode, 32, txn.m_rdata[i]);
+            end
         end
 
-        resp_bit_idx = resp_bit_idx - bits_this_cycle;
-        captured     = captured + bits_this_cycle;
+        `uvm_info(get_type_name(), $sformatf("Collected response: status=0x%02h", txn.m_status), UVM_HIGH)
+    endtask: collect_response
 
-        if (captured < total_response_bits) begin
-          @(m_vif.cb);
+    // -------------------------------------------------------------------------
+    // collect_response_data - collect data bits MSB-first from pdo
+    //   Uses mon_cb to sample DUT output. Advances clock after each beat
+    //   except the last one (caller controls overall timing).
+    // -------------------------------------------------------------------------
+    task collect_response_data(input bit [1:0] lane_mode,
+                               input int unsigned num_bits,
+                               output logic [31:0] data);
+        int unsigned bits_per_beat;
+        int unsigned num_beats;
+        int unsigned beat_idx;
+        int unsigned bit_idx;
+        logic [15:0] pdo_val;
+
+        data = 32'h0;
+
+        bits_per_beat = get_bits_per_beat(lane_mode);
+        num_beats     = (num_bits + bits_per_beat - 1) / bits_per_beat;
+
+        for (beat_idx = 0; beat_idx < num_beats; beat_idx++) begin
+            pdo_val = m_vif.mon_cb.pdo;
+
+            for (int lane = 0; lane < bits_per_beat; lane++) begin
+                bit_idx = num_bits - 1 - (beat_idx * bits_per_beat) - lane;
+                if (bit_idx >= 0 && bit_idx < num_bits) begin
+                    data[bit_idx] = pdo_val[bits_per_beat - 1 - lane];
+                end
+            end
+
+            // Advance clock after each beat except the last
+            if (beat_idx < num_beats - 1) begin
+                @(m_vif.mon_cb);
+            end
         end
-      end
-    end : capture_resp_loop
+    endtask: collect_response_data
 
-    // Parse status byte (first 8 bits of response)
-    status_val = resp_data[511 -: 8];
-    txn.status = status_val;
-
-    // Parse rdata words if present
-    if (total_response_bits > 8) begin
-      int num_words;
-      num_words   = (total_response_bits - 8) / 32;
-      txn.rdata   = new[num_words];
-      for (int i = 0; i < num_words; i++) begin
-        txn.rdata[i] = resp_data[(511-8-i*32) -: 32];
-      end
-    end
-
-    // Wait for DUT to release the bus
-    wait (m_vif.pdo_oe_o === 1'b0);
-  endtask : capture_response
-
-  // ---------------------------------------------------------------
-  // capture_status_only : Capture only the status byte for writes
-  //   Used for write transactions (WR_CSR, AHB_WR32, AHB_WR_BURST)
-  // ---------------------------------------------------------------
-  virtual task capture_status_only(aplc_spi_txn txn);
-    logic [7:0] status_val;
-    int         bits_per_cycle;
-    int         bits_this_cycle;
-    int         captured;
-
-    bits_per_cycle = get_bits_per_cycle(txn.lane_mode);
-
-    // Wait for DUT to start driving (pdo_oe_o = 1)
-    wait (m_vif.pdo_oe_o === 1'b1);
-    @(m_vif.cb);
-
-    // Capture 8-bit status MSB-first
-    status_val = '0;
-    captured = 0;
-    while (captured < 8) begin
-      bits_this_cycle = ((8 - captured) < bits_per_cycle) ?
-                         (8 - captured) : bits_per_cycle;
-      for (int b = 0; b < bits_this_cycle; b++) begin
-        status_val[7 - captured - b] = m_vif.pdo_o[bits_per_cycle - 1 - b];
-      end
-      captured = captured + bits_this_cycle;
-      if (captured < 8) @(m_vif.cb);
-    end
-
-    txn.status = status_val;
-
-    // Wait for DUT to release the bus
-    wait (m_vif.pdo_oe_o === 1'b0);
-  endtask : capture_status_only
-
-  // ---------------------------------------------------------------
-  // get_bits_per_cycle : Map lane_mode to bits per clock cycle
-  //   2'b00 = 1-bit, 2'b01 = 4-bit, 2'b10 = 8-bit, 2'b11 = 16-bit
-  // ---------------------------------------------------------------
-  virtual function int get_bits_per_cycle(bit [1:0] lm);
-    case (lm)
-      2'b00: get_bits_per_cycle = 1;
-      2'b01: get_bits_per_cycle = 4;
-      2'b10: get_bits_per_cycle = 8;
-      2'b11: get_bits_per_cycle = 16;
-      default: get_bits_per_cycle = 1;
-    endcase
-  endfunction : get_bits_per_cycle
-
-endclass : aplc_spi_driver
+endclass: aplc_spi_driver

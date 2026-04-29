@@ -1,42 +1,56 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_csr_config.svh
-// Description: CSR agent configuration object
-//----------------------------------------------------------------------
+// Description: APLC-Lite CSR agent configuration class
+// =============================================================================
 
 class aplc_csr_config extends uvm_object;
 
-  `uvm_object_utils(aplc_csr_config)
+    // -------------------------------------------------------------------------
+    // Configuration fields
+    // -------------------------------------------------------------------------
+    virtual aplc_csr_if              m_vif;
+    uvm_active_passive_enum         m_is_active    = UVM_ACTIVE;
+    bit                             m_has_coverage = 1;
 
-  // Virtual interface
-  virtual aplc_csr_if m_vif;
+    // -------------------------------------------------------------------------
+    // CSR register storage (64 entries of 32-bit, addresses 0x00~0x3F)
+    // -------------------------------------------------------------------------
+    bit [31:0] m_csr_mem [64];
 
-  // Active/passive mode
-  bit is_active = UVM_ACTIVE;
+    // -------------------------------------------------------------------------
+    // UVM factory registration
+    // -------------------------------------------------------------------------
+    `uvm_object_utils(aplc_csr_config)
 
-  // Enable monitor
-  bit has_monitor = 1;
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name = "aplc_csr_config");
+        super.new(name);
+        init_csr_mem();
+    endfunction: new
 
-  // CSR register map (address -> value)
-  // Initialized with default values in build_phase of agent/driver
-  bit [31:0] csr_reg_map [bit [7:0]];
+    // -------------------------------------------------------------------------
+    // Task: init_csr_mem - Initialize all CSR registers to zero
+    // -------------------------------------------------------------------------
+    function void init_csr_mem();
+        foreach (m_csr_mem[i]) begin
+            m_csr_mem[i] = 32'h0;
+        end
+    endfunction: init_csr_mem
 
-  function new(string name = "aplc_csr_config");
-    super.new(name);
-    init_default_regs();
-  endfunction
+    // -------------------------------------------------------------------------
+    // Function: set_csr - Write a value to a CSR register
+    // -------------------------------------------------------------------------
+    function void set_csr(bit [5:0] addr, bit [31:0] data);
+        m_csr_mem[addr] = data;
+    endfunction: set_csr
 
-  // Initialize CSR register map with default values
-  virtual function void init_default_regs();
-    // 0x00: VERSION (RO, static)
-    csr_reg_map[8'h00] = 32'h0001_0000; // Version 1.0
-    // 0x04: CTRL (RW)
-    csr_reg_map[8'h04] = 32'h0000_0000;
-    // 0x08: STATUS (RO, dynamic)
-    csr_reg_map[8'h08] = 32'h0000_0000;
-    // 0x0C: LAST_ERR (RO, dynamic)
-    csr_reg_map[8'h0C] = 32'h0000_0000;
-    // 0x10: BURST_CNT (WC)
-    csr_reg_map[8'h10] = 32'h0000_0000;
-  endfunction
+    // -------------------------------------------------------------------------
+    // Function: get_csr - Read a value from a CSR register
+    // -------------------------------------------------------------------------
+    function bit [31:0] get_csr(bit [5:0] addr);
+        return m_csr_mem[addr];
+    endfunction: get_csr
 
-endclass
+endclass: aplc_csr_config

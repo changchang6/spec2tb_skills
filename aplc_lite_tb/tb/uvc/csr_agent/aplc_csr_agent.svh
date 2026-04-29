@@ -1,62 +1,73 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_csr_agent.svh
-// Description: CSR agent
-//----------------------------------------------------------------------
+// Description: APLC-Lite CSR agent
+//              Contains driver, monitor, sequencer, and config
+// =============================================================================
 
 class aplc_csr_agent extends uvm_agent;
 
-  `uvm_component_utils(aplc_csr_agent)
+    // -------------------------------------------------------------------------
+    // Member variables
+    // -------------------------------------------------------------------------
+    aplc_csr_driver     m_driver;
+    aplc_csr_monitor    m_monitor;
+    aplc_csr_sequencer  m_sequencer;
+    aplc_csr_config     m_config;
+    uvm_analysis_port #(aplc_csr_txn) m_analysis_port;
 
-  // Configuration
-  aplc_csr_config m_cfg;
+    // -------------------------------------------------------------------------
+    // UVM factory registration
+    // -------------------------------------------------------------------------
+    `uvm_component_utils(aplc_csr_agent)
 
-  // Components
-  aplc_csr_driver    m_driver;
-  aplc_csr_sequencer m_sequencer;
-  aplc_csr_monitor   m_monitor;
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction: new
 
-  // Analysis port (connected to monitor's analysis port)
-  uvm_analysis_port #(aplc_csr_txn) m_analysis_port;
+    // -------------------------------------------------------------------------
+    // build_phase
+    // -------------------------------------------------------------------------
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
 
-  function new(string name, uvm_component parent);
-    super.new(name, parent);
-  endfunction
+        // Get config object
+        if (!uvm_config_db #(aplc_csr_config)::get(this, "", "m_config", m_config)) begin
+            `uvm_fatal("APLC_CSR_AGENT", "Failed to get m_config from config db")
+        end
 
-  virtual function void build_phase(uvm_phase phase);
-    super.build_phase(phase);
+        // Create monitor (always present)
+        m_monitor = aplc_csr_monitor::type_id::create("m_monitor", this);
 
-    // Get configuration
-    if (!uvm_config_db #(aplc_csr_config)::get(this, "", "csr_config", m_cfg)) begin
-      `uvm_fatal("NOCONFIG", "aplc_csr_config not found in config_db")
-    end
+        // Create driver and sequencer only in ACTIVE mode
+        if (m_config.m_is_active == UVM_ACTIVE) begin
+            m_driver    = aplc_csr_driver::type_id::create("m_driver", this);
+            m_sequencer = aplc_csr_sequencer::type_id::create("m_sequencer", this);
+        end
 
-    // Create monitor
-    if (m_cfg.has_monitor) begin
-      m_monitor = aplc_csr_monitor::type_id::create("m_monitor", this);
-    end
+        // Propagate config to sub-components
+        uvm_config_db#(aplc_csr_config)::set(this, "m_driver*", "m_config", m_config);
+        uvm_config_db#(aplc_csr_config)::set(this, "m_monitor*", "m_config", m_config);
 
-    // Create driver and sequencer for active mode
-    if (m_cfg.is_active == UVM_ACTIVE) begin
-      m_driver    = aplc_csr_driver::type_id::create("m_driver", this);
-      m_sequencer = aplc_csr_sequencer::type_id::create("m_sequencer", this);
-    end
+        // Create analysis port
+        m_analysis_port = new("m_analysis_port", this);
+    endfunction: build_phase
 
-    // Create analysis port
-    m_analysis_port = new("m_analysis_port", this);
-  endfunction
+    // -------------------------------------------------------------------------
+    // connect_phase
+    // -------------------------------------------------------------------------
+    function void connect_phase(uvm_phase phase);
+        super.connect_phase(phase);
 
-  virtual function void connect_phase(uvm_phase phase);
-    super.connect_phase(phase);
+        // Connect monitor analysis port to agent analysis port
+        m_monitor.m_analysis_port.connect(m_analysis_port);
 
-    // Connect monitor analysis port to agent analysis port
-    if (m_cfg.has_monitor && m_monitor != null) begin
-      m_monitor.m_analysis_port.connect(m_analysis_port);
-    end
+        // Connect driver to sequencer in ACTIVE mode
+        if (m_config.m_is_active == UVM_ACTIVE) begin
+            m_driver.seq_item_port.connect(m_sequencer.seq_item_export);
+        end
+    endfunction: connect_phase
 
-    // Connect driver to sequencer
-    if (m_cfg.is_active == UVM_ACTIVE) begin
-      m_driver.seq_item_port.connect(m_sequencer.seq_item_export);
-    end
-  endfunction
-
-endclass
+endclass: aplc_csr_agent

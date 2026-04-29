@@ -1,41 +1,66 @@
-// APLC-Lite CSR File Interface
-// Connects DUT CSR interface to CSR Agent
-// Signal names use _o/_i suffixes matching DUT port names
+// =============================================================================
+// File: aplc_csr_if.sv
+// Description: APLC-Lite CSR interface for testbench
+//              DUT drives CSR requests; TB models CSR File behavior
+// =============================================================================
+
 interface aplc_csr_if (
-    input logic clk,
-    input logic rst_n
+    input logic csr_clk
 );
 
-    logic        csr_rd_en_o;
-    logic        csr_wr_en_o;
-    logic [7:0]  csr_addr_o;
-    logic [31:0] csr_wdata_o;
-    logic [31:0] csr_rdata_i;
+    // -------------------------------------------------------------------------
+    // Signal declarations
+    // -------------------------------------------------------------------------
+    logic [5:0]  csr_addr;
+    logic [31:0] csr_wdata;
+    logic [31:0] csr_rdata;
+    logic        csr_write;
+    logic        csr_valid;
 
-    clocking cb @(posedge clk);
-        default input #1step output #0;
-        input  csr_rd_en_o, csr_wr_en_o, csr_addr_o, csr_wdata_o;
-        output csr_rdata_i;
-    endclocking
+    initial csr_rdata = 32'h0;
 
-    clocking cb_monitor @(posedge clk);
-        default input #1step output #0;
-        input csr_rd_en_o, csr_wr_en_o, csr_addr_o, csr_wdata_o, csr_rdata_i;
-    endclocking
+    // -------------------------------------------------------------------------
+    // Clocking block for driver
+    //   - Outputs: csr_rdata (driven by TB CSR model)
+    //   - Inputs:  csr_addr, csr_wdata, csr_write, csr_valid (driven by DUT)
+    // -------------------------------------------------------------------------
+    clocking drv_cb @(posedge csr_clk);
+        output csr_rdata;
+        input  csr_addr;
+        input  csr_wdata;
+        input  csr_write;
+        input  csr_valid;
+    endclocking: drv_cb
 
-    modport slave (
-        clocking cb,
-        output csr_rdata_i,
-        input  csr_rd_en_o, csr_wr_en_o, csr_addr_o, csr_wdata_o
+    // -------------------------------------------------------------------------
+    // Clocking block for monitor
+    //   - Inputs: all signals (observe only)
+    // -------------------------------------------------------------------------
+    clocking mon_cb @(posedge csr_clk);
+        input csr_addr;
+        input csr_wdata;
+        input csr_rdata;
+        input csr_write;
+        input csr_valid;
+    endclocking: mon_cb
+
+    // -------------------------------------------------------------------------
+    // Modports
+    // -------------------------------------------------------------------------
+    modport DRIVER (
+        clocking drv_cb,
+        import   task drive_idle()
     );
 
-    modport monitor (
-        clocking cb_monitor
+    modport MONITOR (
+        clocking mon_cb
     );
 
-    modport passive (
-        input  clk, rst_n,
-        input  csr_rd_en_o, csr_wr_en_o, csr_addr_o, csr_wdata_o, csr_rdata_i
-    );
+    // -------------------------------------------------------------------------
+    // Task: drive_idle - Set CSR outputs to idle/default state
+    // -------------------------------------------------------------------------
+    task drive_idle();
+        csr_rdata = 32'h0;
+    endtask: drive_idle
 
-endinterface
+endinterface: aplc_csr_if

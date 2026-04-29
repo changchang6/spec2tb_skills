@@ -1,0 +1,104 @@
+{
+    "uvm_pkg": [
+        "uvm_pkg",
+        "zr7M1",
+        "module",
+        4
+    ],
+    "...MASTER...": [
+        "SIM",
+        "amcQw",
+        "module",
+        17
+    ],
+    "aplc_ahb_if": [
+        "aplc_ahb_if",
+        "QRjNq",
+        "module",
+        8
+    ],
+    "APLC_LITE": [
+        "APLC_LITE",
+        "yf4Vz",
+        "module",
+        6
+    ],
+    "_vcs_DPI_package": [
+        "_vcs_DPI_package",
+        "uM9F1",
+        "module",
+        1
+    ],
+    "_vcs_msglog": [
+        "_vcs_msglog",
+        "zQBzV",
+        "module",
+        5
+    ],
+    "aplc_ahb_pkg": [
+        "aplc_ahb_pkg",
+        "HayYs",
+        "module",
+        11
+    ],
+    "vcs_paramclassrepository": [
+        "vcs_paramclassrepository",
+        "hEeZs",
+        "module",
+        2
+    ],
+    "std": [
+        "std",
+        "reYIK",
+        "module",
+        3
+    ],
+    "aplc_spi_pkg": [
+        "aplc_spi_pkg",
+        "tMTgY",
+        "module",
+        10
+    ],
+    "aplc_tb_top": [
+        "aplc_tb_top",
+        "wB2DY",
+        "module",
+        16
+    ],
+    "aplc_csr_pkg": [
+        "aplc_csr_pkg",
+        "HS47H",
+        "module",
+        12
+    ],
+    "aplc_spi_if": [
+        "aplc_spi_if",
+        "qdDNE",
+        "module",
+        7
+    ],
+    "aplc_test_pkg": [
+        "aplc_test_pkg",
+        "fUmzZ",
+        "module",
+        15
+    ],
+    "aplc_csr_if": [
+        "aplc_csr_if",
+        "bNT9j",
+        "module",
+        9
+    ],
+    "aplc_env_pkg": [
+        "aplc_env_pkg",
+        "vGCuG",
+        "module",
+        13
+    ],
+    "aplc_seq_pkg": [
+        "aplc_seq_pkg",
+        "CIB77",
+        "module",
+        14
+    ]
+}

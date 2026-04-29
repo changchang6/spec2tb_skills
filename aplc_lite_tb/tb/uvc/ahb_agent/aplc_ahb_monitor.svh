@@ -1,215 +1,204 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_ahb_monitor.svh
-// Description: AHB-Lite monitor - observes bus and creates transactions
+// Description: APLC-Lite AHB monitor
+//              Monitors AHB bus transactions and sends via analysis port
 //
-// Monitors AHB bus activity with proper pipeline awareness:
-//   - Detects NONSEQ as start of transfer
-//   - Tracks burst beats (SEQ following NONSEQ)
-//   - Captures address, data, burst info
-//   - Handles hready=0 (wait states) correctly:
-//       When hready=0, both address and data phases are stalled
-//   - Sends transactions via analysis_port
-//   - Detects AHB protocol violations
-//----------------------------------------------------------------------
+// AHB Pipeline Protocol (monitor perspective):
+//   - Address phase on clock N: sample haddr, htrans, hwrite, hsize, hburst
+//   - Data phase on clock N+1: sample hwdata (write) or hrdata (read), hresp
+//   - When hreadyout=0, data phase is extended; wait until hreadyout=1
+//   - During bursts, address phase of beat N+1 coincides with data phase of beat N
+// =============================================================================
 
 class aplc_ahb_monitor extends uvm_monitor;
 
-  `uvm_component_utils(aplc_ahb_monitor)
+    // -------------------------------------------------------------------------
+    // Member variables
+    // -------------------------------------------------------------------------
+    virtual aplc_ahb_if                 m_vif;
+    aplc_ahb_config                     m_config;
+    uvm_analysis_port #(aplc_ahb_txn)   m_analysis_port;
 
-  // Analysis port
-  uvm_analysis_port #(aplc_ahb_txn) m_analysis_port;
+    // -------------------------------------------------------------------------
+    // AHB burst type constants
+    // -------------------------------------------------------------------------
+    localparam BT_SINGLE = 3'b000;
+    localparam BT_INCR4  = 3'b011;
+    localparam BT_INCR8  = 3'b101;
+    localparam BT_INCR16 = 3'b111;
 
-  // Virtual interface
-  virtual aplc_ahb_if m_vif;
+    // -------------------------------------------------------------------------
+    // AHB transfer type constants
+    // -------------------------------------------------------------------------
+    localparam TT_IDLE   = 2'b00;
+    localparam TT_NONSEQ = 2'b10;
+    localparam TT_SEQ    = 2'b11;
 
-  // Configuration
-  aplc_ahb_config m_cfg;
+    // -------------------------------------------------------------------------
+    // AHB response constants
+    // -------------------------------------------------------------------------
+    localparam RSP_OKAY  = 1'b0;
+    localparam RSP_ERROR = 1'b1;
 
-  // Constants for htrans
-  localparam bit [1:0] HTYPE_IDLE   = 2'b00;
-  localparam bit [1:0] HTYPE_BUSY   = 2'b01;
-  localparam bit [1:0] HTYPE_NONSEQ = 2'b10;
-  localparam bit [1:0] HTYPE_SEQ    = 2'b11;
+    // -------------------------------------------------------------------------
+    // UVM factory registration
+    // -------------------------------------------------------------------------
+    `uvm_component_utils(aplc_ahb_monitor)
 
-  // Constants for hburst
-  localparam bit [2:0] HBURST_SINGLE = 3'b000;
-  localparam bit [2:0] HBURST_INCR4  = 3'b011;
-  localparam bit [2:0] HBURST_INCR8  = 3'b101;
-  localparam bit [2:0] HBURST_INCR16 = 3'b111;
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction: new
 
-  function new(string name, uvm_component parent);
-    super.new(name, parent);
-  endfunction
+    // -------------------------------------------------------------------------
+    // build_phase
+    // -------------------------------------------------------------------------
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
 
-  virtual function void build_phase(uvm_phase phase);
-    super.build_phase(phase);
-    m_analysis_port = new("m_analysis_port", this);
+        m_analysis_port = new("m_analysis_port", this);
 
-    if (!uvm_config_db #(aplc_ahb_config)::get(this, "", "ahb_config", m_cfg)) begin
-      `uvm_fatal("NOCONFIG", "aplc_ahb_config not found in config_db")
-    end
-    m_vif = m_cfg.m_vif;
-  endfunction
-
-  virtual task run_phase(uvm_phase phase);
-    forever begin
-      @(posedge m_vif.hclk);
-      collect_transaction();
-    end
-  endtask
-
-  // Collect AHB transactions from the bus
-  // Uses cycle-by-cycle tracking that correctly handles pipeline stalls
-  virtual task collect_transaction();
-    bit [1:0]  cur_htrans;
-    bit [31:0] cur_addr;
-    bit        cur_write;
-    bit [2:0]  cur_burst;
-    bit [2:0]  cur_size;
-    bit        cur_hready;
-
-    aplc_ahb_txn txn;
-    int          beat_count;
-    int          expected_beats;
-    bit [31:0]   burst_addr;
-    bit          burst_active;
-    bit          burst_write;
-    bit [2:0]    burst_type;
-
-    // Sample address phase signals
-    cur_htrans  = m_vif.htrans;
-    cur_addr    = m_vif.haddr;
-    cur_write   = m_vif.hwrite;
-    cur_burst   = m_vif.hburst;
-    cur_size    = m_vif.hsize;
-    cur_hready  = m_vif.hready;
-
-    // Detect start of transfer (NONSEQ with hready)
-    // Note: hready here reflects the data phase completion; when hready=1,
-    // the address phase is accepted and data phase moves forward
-    if (cur_htrans == HTYPE_NONSEQ && cur_hready) begin
-      txn = aplc_ahb_txn::type_id::create("txn");
-      txn.addr  = cur_addr;
-      txn.write = cur_write;
-      txn.burst = cur_burst;
-      txn.size  = cur_size;
-      txn.trans = cur_htrans;
-
-      // Calculate expected burst length
-      case (cur_burst)
-        HBURST_SINGLE: expected_beats = 1;
-        HBURST_INCR4:  expected_beats = 4;
-        HBURST_INCR8:  expected_beats = 8;
-        HBURST_INCR16: expected_beats = 16;
-        default:       expected_beats = 1;
-      endcase
-      txn.burst_len = expected_beats;
-      txn.data = new[expected_beats];
-
-      burst_addr   = cur_addr;
-      burst_active = 1'b1;
-      burst_write  = cur_write;
-      burst_type   = cur_burst;
-      beat_count   = 0;
-
-      // Collect data phase for first beat
-      // Data phase occurs when hready=1 (which may be this cycle or a future one)
-      collect_beat_data(txn, beat_count, burst_write);
-      beat_count++;
-      burst_addr = burst_addr + 4;
-
-      // Collect remaining burst beats
-      while (beat_count < expected_beats && burst_active) begin
-        @(posedge m_vif.hclk);
-        cur_htrans  = m_vif.htrans;
-        cur_hready  = m_vif.hready;
-
-        // When hready=0, the address phase is stalled, wait for hready
-        if (!cur_hready) begin
-          // Wait for hready to assert
-          while (!m_vif.hready) begin
-            @(posedge m_vif.hclk);
-          end
-          cur_htrans = m_vif.htrans;
+        if (!uvm_config_db #(aplc_ahb_config)::get(this, "", "m_config", m_config)) begin
+            `uvm_fatal("APLC_AHB_MON", "Failed to get m_config from config db")
         end
 
-        if (cur_htrans == HTYPE_SEQ) begin
-          // Valid SEQ beat in burst
-          burst_addr = m_vif.haddr;
-          collect_beat_data(txn, beat_count, burst_write);
-          beat_count++;
-          burst_addr = burst_addr + 4;
+        m_vif = m_config.m_vif;
+        if (m_vif == null) begin
+            `uvm_fatal("APLC_AHB_MON", "Virtual interface handle is null")
         end
-        else if (cur_htrans == HTYPE_IDLE) begin
-          // Burst was terminated early
-          `uvm_warning("AHB_MON", $sformatf("Burst terminated early at beat %0d of %0d", beat_count, expected_beats))
-          burst_active = 1'b0;
+    endfunction: build_phase
+
+    // -------------------------------------------------------------------------
+    // run_phase - main monitor loop
+    // -------------------------------------------------------------------------
+    task run_phase(uvm_phase phase);
+        forever begin
+            // Wait for reset deassertion
+            wait (m_vif.hresetn === 1'b1);
+            @(m_vif.mon_cb);
+
+            // Look for a valid address phase start (NONSEQ with hsel)
+            if (m_vif.mon_cb.hsel === 1'b1 &&
+                m_vif.mon_cb.htrans inside {TT_NONSEQ}) begin
+                collect_transfer();
+            end
         end
-        else if (cur_htrans == HTYPE_NONSEQ) begin
-          // New transfer started, burst was broken
-          `uvm_warning("AHB_MON", $sformatf("Burst broken by NONSEQ at beat %0d of %0d", beat_count, expected_beats))
-          burst_active = 1'b0;
+    endtask: run_phase
+
+    // -------------------------------------------------------------------------
+    // Task: collect_transfer
+    //   Collect an AHB transfer (SINGLE or burst) from the bus
+    //   Tracks address phase and data phase separately to handle pipelining
+    // -------------------------------------------------------------------------
+    task collect_transfer();
+        aplc_ahb_txn txn;
+        bit [31:0]   addr;
+        bit [2:0]    burst;
+        bit [2:0]    size;
+        bit          is_write;
+        bit          resp;
+        int          burst_len;
+        int          byte_count;
+        int          beat_idx;
+        int          data_count;
+
+        // Capture address phase of the first beat (NONSEQ)
+        addr     = m_vif.mon_cb.haddr;
+        burst    = m_vif.mon_cb.hburst;
+        size     = m_vif.mon_cb.hsize;
+        is_write = m_vif.mon_cb.hwrite;
+
+        // Determine burst length
+        case (burst)
+            BT_SINGLE: burst_len = 1;
+            BT_INCR4:  burst_len = 4;
+            BT_INCR8:  burst_len = 8;
+            BT_INCR16: burst_len = 16;
+            default:   burst_len = 1;
+        endcase
+
+        byte_count = (1 << size);
+
+        // Create transaction
+        txn = aplc_ahb_txn::type_id::create("txn");
+        txn.m_addr  = addr;
+        txn.m_write = is_write;
+        txn.m_burst = burst;
+        txn.m_size  = size;
+        txn.m_trans = TT_NONSEQ;
+        txn.m_data  = new[burst_len];
+
+        // -----------------------------------------------------------------
+        // Collect data for each beat of the burst
+        // -----------------------------------------------------------------
+        data_count = 0;
+        for (beat_idx = 0; beat_idx < burst_len; beat_idx++) begin
+            // Wait for data phase to complete (hreadyout must be high)
+            wait_for_ready();
+
+            // Data phase: capture data and response
+            if (is_write) begin
+                txn.m_data[beat_idx] = m_vif.mon_cb.hwdata;
+            end else begin
+                txn.m_data[beat_idx] = m_vif.mon_cb.hrdata;
+            end
+
+            resp = m_vif.mon_cb.hresp;
+            txn.m_response = resp;
+
+            data_count++;
+
+            `uvm_info("APLC_AHB_MON",
+                $sformatf("Beat[%0d/%0d] addr=0x%08h data=0x%08h write=%0d resp=%0s",
+                          beat_idx, burst_len-1, addr, txn.m_data[beat_idx],
+                          is_write, resp ? "ERROR" : "OKAY"),
+                UVM_HIGH)
+
+            // If ERROR response, burst terminates (two-cycle error)
+            if (resp == RSP_ERROR) begin
+                // Wait for the second cycle of the two-cycle error response
+                @(m_vif.mon_cb);
+                wait_for_ready();
+                break;
+            end
+
+            // Update address for next beat
+            addr = addr + byte_count;
+
+            // Advance to next clock edge for next beat's address/data phase
+            if (beat_idx < burst_len - 1) begin
+                @(m_vif.mon_cb);
+            end
         end
-      end
 
-      // Resize data array if burst was terminated early
-      if (beat_count < expected_beats) begin
-        bit [31:0] tmp_data[];
-        tmp_data = new[beat_count];
-        foreach (tmp_data[i]) tmp_data[i] = txn.data[i];
-        txn.data = new[beat_count];
-        foreach (txn.data[i]) txn.data[i] = tmp_data[i];
-        txn.burst_len = beat_count;
-      end
+        // If burst was terminated early, resize the data array
+        if (data_count < burst_len) begin
+            begin
+                bit [31:0] tmp_data[];
+                tmp_data = new[data_count](txn.m_data);
+                txn.m_data = tmp_data;
+            end
+        end
 
-      // Send transaction
-      `uvm_info("AHB_MON", $sformatf("Collected: %s", txn.convert2string()), UVM_HIGH)
-      m_analysis_port.write(txn);
-    end
-    else if (cur_htrans == HTYPE_SEQ && cur_hready) begin
-      // Stray SEQ without preceding NONSEQ - protocol violation
-      `uvm_error("AHB_MON", $sformatf("SEQ without NONSEQ at addr=0x%08h", cur_addr))
-    end
+        `uvm_info("APLC_AHB_MON",
+            $sformatf("Collected: %s", txn.convert2string()),
+            UVM_MEDIUM)
 
-    // Check for protocol violations
-    check_protocol(cur_htrans, cur_burst, cur_size, cur_hready);
-  endtask
+        // Send transaction via analysis port
+        m_analysis_port.write(txn);
 
-  // Collect data phase for a single beat
-  // Waits for hready=1 in the data phase, then samples data
-  virtual task collect_beat_data(aplc_ahb_txn txn, int beat_idx, bit is_write);
-    // Wait for data phase (1 cycle after address phase)
-    @(posedge m_vif.hclk);
+    endtask: collect_transfer
 
-    // Wait for hready in data phase (may have wait states)
-    while (!m_vif.hready) begin
-      @(posedge m_vif.hclk);
-    end
+    // -------------------------------------------------------------------------
+    // Task: wait_for_ready
+    //   Wait until hreadyout is asserted (data phase completes)
+    // -------------------------------------------------------------------------
+    task wait_for_ready();
+        while (m_vif.mon_cb.hreadyout !== 1'b1) begin
+            @(m_vif.mon_cb);
+        end
+    endtask: wait_for_ready
 
-    if (is_write) begin
-      txn.data[beat_idx] = m_vif.hwdata;
-    end
-    else begin
-      txn.data[beat_idx] = m_vif.hrdata;
-    end
-
-    // Capture response for this beat
-    txn.response = m_vif.hresp;
-  endtask
-
-  // Check for AHB protocol violations
-  virtual function void check_protocol(bit [1:0] htrans, bit [2:0] hburst, bit [2:0] hsize, bit hready);
-    // Check that hsize is WORD (3'b010) for this design
-    if ((htrans == HTYPE_NONSEQ || htrans == HTYPE_SEQ) && hsize != 3'b010) begin
-      `uvm_error("AHB_PROTO", $sformatf("Invalid hsize=%03b, expected 3'b010 (WORD)", hsize))
-    end
-
-    // Check that hburst encoding is valid during active transfer
-    if ((htrans == HTYPE_NONSEQ || htrans == HTYPE_SEQ)) begin
-      if (!(hburst inside {HBURST_SINGLE, HBURST_INCR4, HBURST_INCR8, HBURST_INCR16})) begin
-        `uvm_error("AHB_PROTO", $sformatf("Invalid hburst=%03b during active transfer", hburst))
-      end
-    end
-  endfunction
-
-endclass
+endclass: aplc_ahb_monitor

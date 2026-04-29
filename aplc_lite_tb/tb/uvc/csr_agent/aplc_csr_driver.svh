@@ -1,174 +1,135 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_csr_driver.svh
-// Description: CSR slave driver - responds to DUT CSR requests
+// Description: APLC-Lite CSR driver
+//              Responds to DUT's CSR read/write requests
+//              Models external CSR File behavior with 1-cycle read latency
 //
-// DUT drives: csr_rd_en_o, csr_wr_en_o, csr_addr_o, csr_wdata_o
-// This agent drives: csr_rdata_i (returned 1 cycle after csr_rd_en)
-//
-// CSR register types:
-//   RO  - Read Only: writes ignored, reads return stored value
-//   RW  - Read/Write: reads and writes both allowed
-//   WC  - Write Clear: writing any value clears to 0, reads return value
-//   Dynamic RO - Read Only, but value can be updated externally
-//----------------------------------------------------------------------
+// CSR Protocol:
+//   - Write: csr_valid=1, csr_write=1, csr_addr & csr_wdata valid same cycle
+//            Data is stored at the addressed register immediately
+//   - Read:  csr_valid=1, csr_write=0, csr_addr valid this cycle
+//            csr_rdata is driven on the NEXT clock edge (1-cycle latency)
+//   - Idle:  csr_valid=0, csr_rdata should be 0 (or don't care)
+// =============================================================================
 
 class aplc_csr_driver extends uvm_driver #(aplc_csr_txn);
 
-  `uvm_component_utils(aplc_csr_driver)
+    // -------------------------------------------------------------------------
+    // Member variables
+    // -------------------------------------------------------------------------
+    virtual aplc_csr_if m_vif;
+    aplc_csr_config     m_config;
 
-  // Virtual interface
-  virtual aplc_csr_if m_vif;
+    // -------------------------------------------------------------------------
+    // Pending read state: tracks a read that was requested last cycle
+    // whose rdata must be driven this cycle
+    // -------------------------------------------------------------------------
+    bit          m_read_pending;
+    bit [31:0]   m_pending_rdata;
 
-  // Configuration
-  aplc_csr_config m_cfg;
+    // -------------------------------------------------------------------------
+    // UVM factory registration
+    // -------------------------------------------------------------------------
+    `uvm_component_utils(aplc_csr_driver)
 
-  // Internal register map (maintained by this driver)
-  bit [31:0] m_regs [bit [7:0]];
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction: new
 
-  // Register access type enumeration
-  typedef enum {
-    CSR_RO,    // Read Only
-    CSR_RW,    // Read/Write
-    CSR_WC     // Write Clear
-  } csr_access_e;
+    // -------------------------------------------------------------------------
+    // build_phase
+    // -------------------------------------------------------------------------
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
 
-  // Register access type map
-  csr_access_e m_reg_type [bit [7:0]];
+        if (!uvm_config_db #(aplc_csr_config)::get(this, "", "m_config", m_config)) begin
+            `uvm_fatal("APLC_CSR_DRV", "Failed to get m_config from config db")
+        end
 
-  function new(string name, uvm_component parent);
-    super.new(name, parent);
-  endfunction
+        m_vif = m_config.m_vif;
+        if (m_vif == null) begin
+            `uvm_fatal("APLC_CSR_DRV", "Virtual interface handle is null")
+        end
+    endfunction: build_phase
 
-  virtual function void build_phase(uvm_phase phase);
-    super.build_phase(phase);
-    if (!uvm_config_db #(aplc_csr_config)::get(this, "", "csr_config", m_cfg)) begin
-      `uvm_fatal("NOCONFIG", "aplc_csr_config not found in config_db")
-    end
-    m_vif = m_cfg.m_vif;
-    init_regs();
-  endfunction
+    // -------------------------------------------------------------------------
+    // run_phase - main driver loop
+    // -------------------------------------------------------------------------
+    task run_phase(uvm_phase phase);
+        // Initialize state
+        m_read_pending = 1'b0;
+        m_pending_rdata = 32'h0;
 
-  // Initialize register map with defaults and access types
-  virtual function void init_regs();
-    // 0x00: VERSION (RO, static)
-    m_regs[8'h00]    = 32'h0001_0000;
-    m_reg_type[8'h00] = CSR_RO;
+        // Initialize outputs
+        m_vif.drive_idle();
 
-    // 0x04: CTRL (RW)
-    m_regs[8'h04]    = 32'h0000_0000;
-    m_reg_type[8'h04] = CSR_RW;
+        forever begin
+            @(m_vif.drv_cb);
 
-    // 0x08: STATUS (RO, dynamic)
-    m_regs[8'h08]    = 32'h0000_0000;
-    m_reg_type[8'h08] = CSR_RO;
+            // If a read was pending from last cycle, drive the rdata now
+            if (m_read_pending) begin
+                m_vif.drv_cb.csr_rdata <= m_pending_rdata;
+                m_read_pending = 1'b0;
+            end else begin
+                m_vif.drv_cb.csr_rdata <= 32'h0;
+            end
 
-    // 0x0C: LAST_ERR (RO, dynamic)
-    m_regs[8'h0C]    = 32'h0000_0000;
-    m_reg_type[8'h0C] = CSR_RO;
+            // Check if DUT is driving a valid CSR request
+            if (m_vif.drv_cb.csr_valid === 1'b1) begin
+                if (m_vif.drv_cb.csr_write === 1'b1) begin
+                    // Write: store data into CSR memory immediately
+                    handle_write();
+                end else begin
+                    // Read: schedule rdata to be driven on the next clock edge
+                    handle_read();
+                end
+            end
+        end
+    endtask: run_phase
 
-    // 0x10: BURST_CNT (WC)
-    m_regs[8'h10]    = 32'h0000_0000;
-    m_reg_type[8'h10] = CSR_WC;
-  endfunction
+    // -------------------------------------------------------------------------
+    // Task: handle_write - Process a CSR write request
+    // -------------------------------------------------------------------------
+    task handle_write();
+        bit [5:0]  addr;
+        bit [31:0] wdata;
 
-  virtual task run_phase(uvm_phase phase);
-    // Initialize output
-    m_vif.csr_rdata_i <= 32'h0;
+        addr  = m_vif.drv_cb.csr_addr;
+        wdata = m_vif.drv_cb.csr_wdata;
 
-    forever begin
-      @(posedge m_vif.clk);
-      process_csr_access();
-    end
-  endtask
+        // Store data in the CSR memory model
+        m_config.m_csr_mem[addr] = wdata;
 
-  // Process CSR read/write requests from DUT
-  virtual task process_csr_access();
-    bit [7:0]  addr;
-    bit [31:0] wdata;
-    bit        rd_en;
-    bit        wr_en;
+        `uvm_info("APLC_CSR_DRV",
+            $sformatf("CSR Write: addr=0x%02h data=0x%08h", addr, wdata),
+            UVM_HIGH)
+    endtask: handle_write
 
-    // Sample request signals from DUT
-    rd_en = m_vif.csr_rd_en_o;
-    wr_en = m_vif.csr_wr_en_o;
-    addr  = m_vif.csr_addr_o;
-    wdata = m_vif.csr_wdata_o;
+    // -------------------------------------------------------------------------
+    // Task: handle_read - Process a CSR read request
+    //   1-cycle read latency: rdata is valid 1 cycle after rd_en
+    //   The actual data is driven on the next clock edge via m_read_pending
+    // -------------------------------------------------------------------------
+    task handle_read();
+        bit [5:0]  addr;
+        bit [31:0] rdata;
 
-    // Handle write request
-    if (wr_en) begin
-      handle_write(addr, wdata);
-    end
+        addr = m_vif.drv_cb.csr_addr;
 
-    // Handle read request (response driven next cycle)
-    if (rd_en) begin
-      handle_read(addr);
-    end
-    else begin
-      // No read request: drive 0 (or hold previous - spec says 1 cycle latency)
-      m_vif.csr_rdata_i <= 32'h0;
-    end
-  endtask
+        // Read from the CSR memory model
+        rdata = m_config.m_csr_mem[addr];
 
-  // Handle a CSR write
-  virtual function void handle_write(bit [7:0] addr, bit [31:0] wdata);
-    csr_access_e access_type;
+        `uvm_info("APLC_CSR_DRV",
+            $sformatf("CSR Read: addr=0x%02h -> data=0x%08h (1-cycle latency)", addr, rdata),
+            UVM_HIGH)
 
-    if (m_reg_type.exists(addr)) begin
-      access_type = m_reg_type[addr];
-    end
-    else begin
-      access_type = CSR_RW; // Default for unmapped addresses
-    end
+        // Schedule the data to be driven on the next clock edge
+        m_read_pending = 1'b1;
+        m_pending_rdata = rdata;
 
-    case (access_type)
-      CSR_RO: begin
-        // Read Only: ignore write, no effect
-        `uvm_info("CSR_DRV", $sformatf("Write to RO register addr=0x%02h ignored", addr), UVM_HIGH)
-      end
-      CSR_RW: begin
-        // Read/Write: store value
-        m_regs[addr] = wdata;
-        `uvm_info("CSR_DRV", $sformatf("Write RW addr=0x%02h data=0x%08h", addr, wdata), UVM_HIGH)
-      end
-      CSR_WC: begin
-        // Write Clear: writing any value clears to 0
-        m_regs[addr] = 32'h0;
-        `uvm_info("CSR_DRV", $sformatf("Write WC addr=0x%02h (cleared to 0)", addr), UVM_HIGH)
-      end
-      default: begin
-        m_regs[addr] = wdata;
-      end
-    endcase
-  endfunction
+    endtask: handle_read
 
-  // Handle a CSR read (drive csr_rdata_i next cycle)
-  virtual task handle_read(bit [7:0] addr);
-    bit [31:0] rdata;
-
-    if (m_regs.exists(addr)) begin
-      rdata = m_regs[addr];
-    end
-    else begin
-      rdata = 32'h0; // Default for unmapped addresses
-    end
-
-    // Drive read data with 1-cycle latency
-    m_vif.csr_rdata_i <= rdata;
-
-    `uvm_info("CSR_DRV", $sformatf("Read addr=0x%02h rdata=0x%08h", addr, rdata), UVM_HIGH)
-  endtask
-
-  // Utility: update a register value externally (for dynamic RO registers)
-  virtual function void set_reg(bit [7:0] addr, bit [31:0] value);
-    m_regs[addr] = value;
-  endfunction
-
-  // Utility: read a register value (for scoreboarding)
-  virtual function bit [31:0] get_reg(bit [7:0] addr);
-    if (m_regs.exists(addr)) begin
-      return m_regs[addr];
-    end
-    return 32'h0;
-  endfunction
-
-endclass
+endclass: aplc_csr_driver

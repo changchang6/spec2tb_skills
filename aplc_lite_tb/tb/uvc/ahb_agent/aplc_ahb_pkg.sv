@@ -1,18 +1,24 @@
-//----------------------------------------------------------------------
+// =============================================================================
 // File: aplc_ahb_pkg.sv
-// Description: AHB-Lite agent package
-//----------------------------------------------------------------------
+// Description: APLC-Lite AHB agent package
+// =============================================================================
 
 package aplc_ahb_pkg;
 
-  import uvm_pkg::*;
-  `include "uvm_macros.svh"
+    // -------------------------------------------------------------------------
+    // Include UVM macros and import UVM package
+    // -------------------------------------------------------------------------
+    `include "uvm_macros.svh"
+    import uvm_pkg::*;
 
-  `include "aplc_ahb_txn.svh"
-  `include "aplc_ahb_config.svh"
-  `include "aplc_ahb_driver.svh"
-  `include "aplc_ahb_monitor.svh"
-  `include "aplc_ahb_sequencer.svh"
-  `include "aplc_ahb_agent.svh"
+    // -------------------------------------------------------------------------
+    // Include AHB agent files
+    // -------------------------------------------------------------------------
+    `include "aplc_ahb_txn.svh"
+    `include "aplc_ahb_config.svh"
+    `include "aplc_ahb_driver.svh"
+    `include "aplc_ahb_monitor.svh"
+    `include "aplc_ahb_sequencer.svh"
+    `include "aplc_ahb_agent.svh"
 
-endpackage
+endpackage: aplc_ahb_pkg
