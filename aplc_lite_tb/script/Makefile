@@ -1,59 +1,97 @@
-# APLC-Lite Testbench Makefile
-# VCS Simulation + Verdi Waveform
+# APLC-Lite UVM Testbench Makefile
+# Usage:
+#   make comp        - Compile the testbench
+#   make sim         - Compile and run default test
+#   make sim TEST=xx - Run specific test
+#   make wave        - Open Verdi to view waveform of last simulation
+#   make clean       - Clean build artifacts
 
-RTL_DIR   = $(HOME)/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl
-TB_DIR    = $(shell pwd)/..
-WORK_DIR  = $(shell pwd)
+# -------------------- Configuration --------------------
+VCS       = vcs
+VERDI     = verdi
 
-VCS_HOME ?= $(HOME)/ProgramFiles/vcs_verdi2018/synopsys/vcs_201809/vcs/O-2018.09-SP2
-VERDI_HOME = $(HOME)/ProgramFiles/vcs_verdi2018/synopsys/verdi_201809/verdi/Verdi_O-2018.09-SP2
-export VCS_HOME
+SCRIPT_DIR    := $(shell pwd)
+APLC_TB_HOME  := $(SCRIPT_DIR)/..
+APLC_RTL_HOME := $(HOME)/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl
+AHB_VIP_HOME  := $(APLC_TB_HOME)/../vip/AHB2
 
-VCS      = vcs
-VCS_FLAGS = -full64 -sverilog -debug_access+all -ntb_opts uvm-1.2 -kdb -lca \
-            -P $(VERDI_HOME)/share/PLI/VCS/LINUX64/novas.tab \
-            $(VERDI_HOME)/share/PLI/VCS/LINUX64/pli.a \
-            -LDFLAGS -Wl,--no-as-needed \
-            +incdir+$(TB_DIR)/tb/if \
-            +incdir+$(TB_DIR)/tb/uvc/spi_agent \
-            +incdir+$(TB_DIR)/tb/uvc/ahb_agent \
-            +incdir+$(TB_DIR)/tb/uvc/csr_agent \
-            +incdir+$(TB_DIR)/tb/env \
-            +incdir+$(TB_DIR)/seq \
-            +incdir+$(TB_DIR)/tc \
-            +incdir+$(RTL_DIR) \
-            +define+DUMP_FSDB \
-            -f $(TB_DIR)/filelist/aplc_verif.f \
-            -l compile.log
+export APLC_TB_HOME
+export APLC_RTL_HOME
 
-SIM_FLAGS = -l sim.log +UVM_VERBOSITY=UVM_LOW
+TEST     ?= aplc_smoke_test
+SEED     ?= $(shell date +%s)
+SIM_DIR  ?= sim_work
+GUI      ?= 0
+DUMP     ?= 1
+COV      ?= 0
+XPROP    ?= 0
+WAVE_FSDB ?= aplc_tb.fsdb
 
-UVM_TEST ?= aplc_smoke_test
+# -------------------- VCS Options --------------------
+VCS_COMP_OPTS = \
+    -full64 \
+    -sverilog \
+    -debug_access+all \
+    -kdb \
+    -lca \
+    +incdir+$(APLC_TB_HOME)/tb/if \
+    +incdir+$(APLC_TB_HOME)/tb/uvc \
+    +incdir+$(APLC_TB_HOME)/tb/uvc/spi_agent \
+    +incdir+$(APLC_TB_HOME)/tb/uvc/csr_agent \
+    +incdir+$(APLC_TB_HOME)/tb/env \
+    +incdir+$(APLC_TB_HOME)/seq \
+    +incdir+$(APLC_TB_HOME)/tc \
+    +incdir+$(APLC_TB_HOME)/reg \
+    +incdir+$(AHB_VIP_HOME)/ahb_test \
+    +incdir+$(AHB_VIP_HOME)/ahb_slv_agent \
+    -timescale=1ns/1ps \
+    -ntb_opts uvm-1.2 \
+    +define+UVM_NO_DPI \
+    -LDFLAGS -Wl,--no-as-needed \
+    -l compile.log
 
-.PHONY: compile sim smoke wave clean
+VCS_SIM_OPTS = \
+    +UVM_TESTNAME=$(TEST) \
+    +ntb_random_seed=$(SEED) \
+    -l $(TEST).log
 
-compile:
-	@echo "=== Compiling APLC-Lite TB ==="
-	cd $(WORK_DIR) && $(VCS) $(VCS_FLAGS) -top aplc_tb_top 2>&1 | tee compile.log
-	@echo "=== Compile done ==="
+# Coverage
+ifeq ($(COV),1)
+VCS_COMP_OPTS += -cm line+cond+fsm+tgl+branch+assert
+VCS_SIM_OPTS  += -cm line+cond+fsm+tgl+branch+assert
+endif
 
-sim: compile
-	@echo "=== Running simulation (test=$(UVM_TEST)) ==="
-	cd $(WORK_DIR) && ./simv $(SIM_FLAGS) +UVM_TESTNAME=$(UVM_TEST) 2>&1 | tee sim.log
-	@echo "=== Simulation done ==="
+# XPROP
+ifeq ($(XPROP),1)
+VCS_COMP_OPTS += -xprop=tmerge
+endif
 
-smoke: compile
-	@echo "=== Running smoke test ==="
-	cd $(WORK_DIR) && ./simv $(SIM_FLAGS) +UVM_TESTNAME=aplc_smoke_test 2>&1 | tee smoke.log
-	@echo "=== Smoke test done ==="
+# Waveform dump (default on)
+ifeq ($(DUMP),1)
+VCS_COMP_OPTS += +define+DUMP_FSDB
+endif
+
+# GUI (default off)
+ifeq ($(GUI),1)
+VCS_SIM_OPTS += -gui=verdi
+endif
+
+# -------------------- Targets --------------------
+.PHONY: comp sim wave clean cov_report
+
+comp:
+	@mkdir -p $(SIM_DIR)
+	cd $(SIM_DIR) && $(VCS) $(VCS_COMP_OPTS) -f $(APLC_TB_HOME)/filelist/aplc_verif.f
+
+sim: comp
+	cd $(SIM_DIR) && ./simv $(VCS_SIM_OPTS)
 
 wave:
-	verdi -sv -f $(TB_DIR)/filelist/aplc_verif.f -ssf aplc.fsdb -top aplc_tb_top &
+	cd $(SIM_DIR) && $(VERDI) -f $(APLC_TB_HOME)/filelist/aplc_verif.f -ssf $(WAVE_FSDB) -top aplc_tb_top -nologo &
+
+cov_report:
+	cd $(SIM_DIR) && urg -dir simv.vdb -report cov_report
 
 clean:
-	rm -rf simv simv.daidir csrc ucli.key compile.log sim.log smoke.log
-	rm -rf *.vpd *.vcd *.fsdb *.log *.key *.vpd DVEfiles
-	rm -rf inter.vpd ucli.key novas* irun.log waves.shm
-
-distclean: clean
-	rm -rf *.vdb
+	rm -rf $(SIM_DIR)
+	rm -rf csrc simv* vc_hdrs.h ucli.key *.log *.vpd *.key *.vdb DVEfiles novas* *.fsdb verdiLog

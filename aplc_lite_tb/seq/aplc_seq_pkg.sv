@@ -1,19 +1,14 @@
-// APLC-Lite Sequence Package
+// APLC Sequence Package
+
 package aplc_seq_pkg;
 
-import uvm_pkg::*;
-import aplc_spi_pkg::*;
-import aplc_ahb_pkg::*;
-import aplc_csr_pkg::*;
+    import uvm_pkg::*;
+    import spi_agent_pkg::*;
+    import ahb_slv_pkg::*;
+    import aplc_env_pkg::*;
+    `include "uvm_macros.svh"
 
-`include "uvm_macros.svh"
-`include "aplc_base_seq.svh"
-`include "aplc_wr_csr_seq.svh"
-`include "aplc_rd_csr_seq.svh"
-`include "aplc_ahb_wr32_seq.svh"
-`include "aplc_ahb_rd32_seq.svh"
-`include "aplc_ahb_wr_burst_seq.svh"
-`include "aplc_ahb_rd_burst_seq.svh"
-`include "aplc_smoke_seq.svh"
+    `include "aplc_base_vseq.svh"
+    `include "aplc_smoke_vseq.svh"
 
 endpackage

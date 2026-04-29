@@ -1,0 +1,11 @@
+// CSR Sequencer
+
+class csr_sequencer extends uvm_sequencer#(csr_xtn);
+
+    `uvm_component_utils(csr_sequencer)
+
+    function new(string name = "csr_sequencer", uvm_component parent = null);
+        super.new(name, parent);
+    endfunction
+
+endclass

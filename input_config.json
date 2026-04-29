@@ -1,7 +1,8 @@
 {
+    "RTM": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/dv/RTM_AI_FLTP_complete.xlsx",
     "DV_SPEC": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/dv/BT_APLC_DV_SPEC.docx",
     "LRS": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/de/APLC LRS.md",
     "HLD": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/de/APLC HLD.md",
     "DUT_TOP": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/rtl/APLC_LITE.sv",
-    "VIP_AHB": "~/Downloads/AHB2/"
+    "VIP_AHB": "./vip/AHB2/"
 }

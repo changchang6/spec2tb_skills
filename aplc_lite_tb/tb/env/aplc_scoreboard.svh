@@ -1,114 +1,97 @@
-// APLC-Lite Scoreboard
-`ifndef APLC_SCOREBOARD_SVH
-`define APLC_SCOREBOARD_SVH
+// APLC Scoreboard
+// Verifies CSR readback values against shadow register model
 
-`uvm_analysis_imp_decl(_ahb_act)
-`uvm_analysis_imp_decl(_csr_act)
+class aplc_scoreboard extends uvm_scoreboard;
 
-class aplc_scoreboard extends uvm_component;
     `uvm_component_utils(aplc_scoreboard)
 
-    uvm_analysis_imp_ahb_act #(aplc_ahb_txn, aplc_scoreboard) m_ahb_act_imp;
-    uvm_analysis_imp_csr_act #(aplc_csr_txn, aplc_scoreboard) m_csr_act_imp;
-    uvm_tlm_analysis_fifo #(aplc_ahb_txn) m_ahb_exp_fifo;
-    uvm_tlm_analysis_fifo #(aplc_ahb_txn) m_ahb_act_fifo;
-    uvm_tlm_analysis_fifo #(aplc_csr_txn) m_csr_exp_fifo;
-    uvm_tlm_analysis_fifo #(aplc_csr_txn) m_csr_act_fifo;
+    uvm_analysis_export#(spi_xtn) m_spi_export;
+    uvm_analysis_export#(csr_xtn) m_csr_export;
 
-    int m_ahb_match_count;
-    int m_ahb_mismatch_count;
-    int m_csr_match_count;
-    int m_csr_mismatch_count;
+    uvm_tlm_analysis_fifo#(spi_xtn) m_spi_fifo;
+    uvm_tlm_analysis_fifo#(csr_xtn) m_csr_fifo;
 
-    function new(string name, uvm_component parent);
+    aplc_reg_model m_reg_model;
+
+    int m_check_count;
+    int m_pass_count;
+    int m_fail_count;
+
+    function new(string name = "aplc_scoreboard", uvm_component parent = null);
         super.new(name, parent);
     endfunction
 
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
-        m_ahb_act_imp  = new("m_ahb_act_imp", this);
-        m_csr_act_imp  = new("m_csr_act_imp", this);
-        m_ahb_exp_fifo = new("m_ahb_exp_fifo", this);
-        m_ahb_act_fifo = new("m_ahb_act_fifo", this);
-        m_csr_exp_fifo = new("m_csr_exp_fifo", this);
-        m_csr_act_fifo = new("m_csr_act_fifo", this);
+        m_spi_export = new("m_spi_export", this);
+        m_csr_export = new("m_csr_export", this);
+        m_spi_fifo   = new("m_spi_fifo", this);
+        m_csr_fifo   = new("m_csr_fifo", this);
+        m_reg_model  = aplc_reg_model::type_id::create("m_reg_model");
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        m_spi_export.connect(m_spi_fifo.analysis_export);
+        m_csr_export.connect(m_csr_fifo.analysis_export);
     endfunction
 
     task run_phase(uvm_phase phase);
         fork
-            compare_ahb();
-            compare_csr();
+            process_spi();
+            process_csr();
         join
     endtask
 
-    task compare_ahb();
-        aplc_ahb_txn exp_txn, act_txn;
+    task process_spi();
+        spi_xtn txn;
         forever begin
-            m_ahb_exp_fifo.get(exp_txn);
-            m_ahb_act_fifo.get(act_txn);
-            if (!compare_ahb_txn(exp_txn, act_txn)) begin
-                `uvm_error(get_type_name(),
-                    $sformatf("AHB MISMATCH: exp addr=0x%08h write=%0b burst=%0d | act addr=0x%08h write=%0b burst=%0d",
-                    exp_txn.m_addr, exp_txn.m_write, exp_txn.m_burst,
-                    act_txn.m_addr, act_txn.m_write, act_txn.m_burst))
-                m_ahb_mismatch_count++;
-            end else begin
-                m_ahb_match_count++;
-            end
+            m_spi_fifo.get(txn);
+            `uvm_info(get_type_name(), $sformatf("Got SPI txn: %s", txn.convert2string()), UVM_HIGH)
+
+            // Update shadow model on writes
+            case (txn.m_opcode)
+                8'h10: begin // WR_CSR
+                    m_reg_model.write(txn.m_reg_addr, txn.m_wdata);
+                end
+                8'h11: begin // RD_CSR - check readback
+                    logic [31:0] expected;
+                    expected = m_reg_model.read(txn.m_reg_addr);
+                    m_check_count++;
+                    if (txn.m_resp_status == 8'h00 && txn.m_resp_has_rdata) begin
+                        if (txn.m_resp_rdata !== expected) begin
+                            `uvm_error(get_type_name(), $sformatf(
+                                "CSR RD mismatch: addr=0x%02h expected=0x%08h got=0x%08h",
+                                txn.m_reg_addr, expected, txn.m_resp_rdata))
+                            m_fail_count++;
+                        end else begin
+                            `uvm_info(get_type_name(), $sformatf(
+                                "CSR RD match: addr=0x%02h data=0x%08h",
+                                txn.m_reg_addr, txn.m_resp_rdata), UVM_LOW)
+                            m_pass_count++;
+                        end
+                    end
+                end
+            endcase
         end
     endtask
 
-    task compare_csr();
-        aplc_csr_txn exp_txn, act_txn;
+    task process_csr();
+        csr_xtn txn;
         forever begin
-            m_csr_exp_fifo.get(exp_txn);
-            m_csr_act_fifo.get(act_txn);
-            if (!compare_csr_txn(exp_txn, act_txn)) begin
-                `uvm_error(get_type_name(),
-                    $sformatf("CSR MISMATCH: exp addr=0x%02h write=%0b data=0x%08h | act addr=0x%02h write=%0b data=0x%08h",
-                    exp_txn.m_addr, exp_txn.m_write, exp_txn.m_data,
-                    act_txn.m_addr, act_txn.m_write, act_txn.m_data))
-                m_csr_mismatch_count++;
-            end else begin
-                m_csr_match_count++;
+            m_csr_fifo.get(txn);
+            `uvm_info(get_type_name(), $sformatf("Got CSR txn: %s", txn.convert2string()), UVM_HIGH)
+
+            // Update shadow model on CSR writes from DUT
+            if (!txn.is_read) begin
+                m_reg_model.write(txn.addr, txn.wdata);
             end
         end
     endtask
-
-    function bit compare_ahb_txn(aplc_ahb_txn exp, aplc_ahb_txn act);
-        if (exp.m_addr != act.m_addr) return 0;
-        if (exp.m_write != act.m_write) return 0;
-        if (exp.m_burst != act.m_burst) return 0;
-        if (exp.m_size != act.m_size) return 0;
-        if (exp.m_data.size() != act.m_data.size()) return 0;
-        foreach (exp.m_data[i]) begin
-            if (exp.m_write && exp.m_data[i] !== act.m_data[i]) return 0;
-        end
-        return 1;
-    endfunction
-
-    function bit compare_csr_txn(aplc_csr_txn exp, aplc_csr_txn act);
-        if (exp.m_addr !== act.m_addr) return 0;
-        if (exp.m_write !== act.m_write) return 0;
-        if (exp.m_write && exp.m_data !== act.m_data) return 0;
-        return 1;
-    endfunction
-
-    function void write_ahb_act(aplc_ahb_txn txn);
-        m_ahb_act_fifo.write(txn);
-    endfunction
-
-    function void write_csr_act(aplc_csr_txn txn);
-        m_csr_act_fifo.write(txn);
-    endfunction
 
     function void report_phase(uvm_phase phase);
-        super.report_phase(phase);
-        `uvm_info(get_type_name(),
-            $sformatf("AHB: %0d match, %0d mismatch | CSR: %0d match, %0d mismatch",
-            m_ahb_match_count, m_ahb_mismatch_count,
-            m_csr_match_count, m_csr_mismatch_count), UVM_LOW)
+        `uvm_info(get_type_name(), $sformatf(
+            "Scoreboard summary: checks=%0d pass=%0d fail=%0d",
+            m_check_count, m_pass_count, m_fail_count), UVM_LOW)
     endfunction
-endclass
 
-`endif
+endclass

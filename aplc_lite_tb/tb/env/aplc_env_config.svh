@@ -1,24 +1,27 @@
-// APLC-Lite Environment Configuration
-`ifndef APLC_ENV_CONFIG_SVH
-`define APLC_ENV_CONFIG_SVH
+// APLC Environment Configuration
 
 class aplc_env_config extends uvm_object;
+
     `uvm_object_utils(aplc_env_config)
 
-    aplc_spi_config m_spi_cfg;
-    aplc_ahb_config m_ahb_cfg;
-    aplc_csr_config m_csr_cfg;
+    spi_config        m_spi_config;
+    csr_config        m_csr_config;
+    ahb_sagent_config m_ahb_sagent_config;
 
-    bit m_has_scoreboard = 1;
-    bit m_has_coverage   = 1;
-    bit m_has_ref_model  = 1;
+    uvm_active_passive_enum spi_is_active;
+    uvm_active_passive_enum csr_is_active;
+    uvm_active_passive_enum ahb_is_active;
+
+    bit has_scoreboard;
+    bit has_coverage;
 
     function new(string name = "aplc_env_config");
         super.new(name);
-        m_spi_cfg = aplc_spi_config::type_id::create("m_spi_cfg");
-        m_ahb_cfg = aplc_ahb_config::type_id::create("m_ahb_cfg");
-        m_csr_cfg = aplc_csr_config::type_id::create("m_csr_cfg");
+        spi_is_active = UVM_ACTIVE;
+        csr_is_active = UVM_ACTIVE;
+        ahb_is_active = UVM_ACTIVE;
+        has_scoreboard = 1'b1;
+        has_coverage   = 1'b1;
     endfunction
-endclass
 
-`endif
+endclass
