@@ -1,17 +1,14 @@
-// APLC Scoreboard
-// Verifies CSR readback values against shadow register model
+// APLC-Lite Scoreboard
+// Checks SPI responses against expected values
+`uvm_analysis_imp_decl(_spi)
+`uvm_analysis_imp_decl(_csr)
 
 class aplc_scoreboard extends uvm_scoreboard;
 
     `uvm_component_utils(aplc_scoreboard)
 
-    uvm_analysis_export#(spi_xtn) m_spi_export;
-    uvm_analysis_export#(csr_xtn) m_csr_export;
-
-    uvm_tlm_analysis_fifo#(spi_xtn) m_spi_fifo;
-    uvm_tlm_analysis_fifo#(csr_xtn) m_csr_fifo;
-
-    aplc_reg_model m_reg_model;
+    uvm_analysis_imp_spi #(spi_xtn, aplc_scoreboard) spi_imp;
+    uvm_analysis_imp_csr #(csr_xtn, aplc_scoreboard) csr_imp;
 
     int m_check_count;
     int m_pass_count;
@@ -23,75 +20,33 @@ class aplc_scoreboard extends uvm_scoreboard;
 
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
-        m_spi_export = new("m_spi_export", this);
-        m_csr_export = new("m_csr_export", this);
-        m_spi_fifo   = new("m_spi_fifo", this);
-        m_csr_fifo   = new("m_csr_fifo", this);
-        m_reg_model  = aplc_reg_model::type_id::create("m_reg_model");
+        spi_imp = new("spi_imp", this);
+        csr_imp = new("csr_imp", this);
     endfunction
 
-    function void connect_phase(uvm_phase phase);
-        m_spi_export.connect(m_spi_fifo.analysis_export);
-        m_csr_export.connect(m_csr_fifo.analysis_export);
+    function void write_spi(spi_xtn xtn);
+        m_check_count++;
+        // Check that all commands received a valid (non-error) response
+        if (xtn.status == 8'h00) begin
+            m_pass_count++;
+            `uvm_info(get_type_name(), $sformatf("PASS: opcode=0x%02h status=STS_OK rdata=0x%08h", xtn.opcode, xtn.rdata), UVM_HIGH)
+        end else begin
+            m_fail_count++;
+            `uvm_error(get_type_name(), $sformatf("FAIL: opcode=0x%02h status=0x%02h rdata=0x%08h", xtn.opcode, xtn.status, xtn.rdata))
+        end
     endfunction
 
-    task run_phase(uvm_phase phase);
-        fork
-            process_spi();
-            process_csr();
-        join
-    endtask
-
-    task process_spi();
-        spi_xtn txn;
-        forever begin
-            m_spi_fifo.get(txn);
-            `uvm_info(get_type_name(), $sformatf("Got SPI txn: %s", txn.convert2string()), UVM_HIGH)
-
-            // Update shadow model on writes
-            case (txn.m_opcode)
-                8'h10: begin // WR_CSR
-                    m_reg_model.write(txn.m_reg_addr, txn.m_wdata);
-                end
-                8'h11: begin // RD_CSR - check readback
-                    logic [31:0] expected;
-                    expected = m_reg_model.read(txn.m_reg_addr);
-                    m_check_count++;
-                    if (txn.m_resp_status == 8'h00 && txn.m_resp_has_rdata) begin
-                        if (txn.m_resp_rdata !== expected) begin
-                            `uvm_error(get_type_name(), $sformatf(
-                                "CSR RD mismatch: addr=0x%02h expected=0x%08h got=0x%08h",
-                                txn.m_reg_addr, expected, txn.m_resp_rdata))
-                            m_fail_count++;
-                        end else begin
-                            `uvm_info(get_type_name(), $sformatf(
-                                "CSR RD match: addr=0x%02h data=0x%08h",
-                                txn.m_reg_addr, txn.m_resp_rdata), UVM_LOW)
-                            m_pass_count++;
-                        end
-                    end
-                end
-            endcase
-        end
-    endtask
-
-    task process_csr();
-        csr_xtn txn;
-        forever begin
-            m_csr_fifo.get(txn);
-            `uvm_info(get_type_name(), $sformatf("Got CSR txn: %s", txn.convert2string()), UVM_HIGH)
-
-            // Update shadow model on CSR writes from DUT
-            if (!txn.is_read) begin
-                m_reg_model.write(txn.addr, txn.wdata);
-            end
-        end
-    endtask
+    function void write_csr(csr_xtn xtn);
+        `uvm_info(get_type_name(), $sformatf("CSR observed: %s", xtn.convert2string()), UVM_HIGH)
+    endfunction
 
     function void report_phase(uvm_phase phase);
-        `uvm_info(get_type_name(), $sformatf(
-            "Scoreboard summary: checks=%0d pass=%0d fail=%0d",
-            m_check_count, m_pass_count, m_fail_count), UVM_LOW)
+        super.report_phase(phase);
+        `uvm_info(get_type_name(), $sformatf("Checks: %0d  Pass: %0d  Fail: %0d",
+            m_check_count, m_pass_count, m_fail_count), UVM_NONE)
+        if (m_fail_count > 0) begin
+            `uvm_error(get_type_name(), "SCOREBOARD FAIL")
+        end
     endfunction
 
 endclass

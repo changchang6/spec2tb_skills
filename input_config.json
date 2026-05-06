@@ -3,6 +3,7 @@
     "DV_SPEC": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/dv/BT_APLC_DV_SPEC.docx",
     "LRS": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/de/APLC LRS.md",
     "HLD": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/de/APLC HLD.md",
-    "DUT_TOP": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/rtl/APLC_LITE.sv",
-    "VIP_AHB": "./vip/AHB2/"
+    "REGMAP": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/doc/de/APLC Regmap.xlsx",
+    "DUT_TOP": "~/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl/APLC_LITE.sv",
+    "VIP_AHB": "./vip/yuu_ahb/"
 }

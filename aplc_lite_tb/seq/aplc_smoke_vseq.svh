@@ -1,88 +1,134 @@
-// APLC Smoke Test Virtual Sequence
-// Tests CSR write then readback, and VERSION register read
-
+// APLC-Lite Smoke Test Virtual Sequence
+// Strategy: Use 1-bit mode (reset default) for initial CTRL configuration,
+// then switch to 16-bit for all subsequent transactions.
 class aplc_smoke_vseq extends aplc_base_vseq;
 
     `uvm_object_utils(aplc_smoke_vseq)
+
+    localparam logic [1:0] LANE_1BIT  = 2'b00;
+    localparam logic [1:0] LANE_16BIT = 2'b11;
 
     function new(string name = "aplc_smoke_vseq");
         super.new(name);
     endfunction
 
     task body();
-        spi_xtn req;
-        ahb_ready_sseq ahb_seq;
+        logic [7:0]  status;
+        logic [31:0] rdata;
+        int pass_cnt, fail_cnt;
+        pass_cnt = 0;
+        fail_cnt = 0;
 
-        // Start AHB slave response sequence in background
-        fork
-            forever begin
-                ahb_seq = ahb_ready_sseq::type_id::create("ahb_seq");
-                ahb_seq.start(p_sequencer.m_ahb_sseqr);
-            end
-        join_none
+        `uvm_info(get_type_name(), "=== APLC Smoke Test ===", UVM_LOW)
 
-        // Wait for reset to release and DUT to stabilize
-        #1us;
+        // Wait for reset to deassert
+        #200ns;
 
-        // Test 1: Write CTRL register (addr=0x04) with known value
-        `uvm_info("SMOKE", "=== Test 1: WR_CSR to CTRL (0x04) ===", UVM_LOW)
-        req = spi_xtn::type_id::create("req");
-        start_item(req, , p_sequencer.m_spi_seqr);
-        req.m_opcode    = 8'h10; // WR_CSR
-        req.m_reg_addr  = 8'h04;
-        req.m_wdata     = 32'hDEAD_BEEF;
-        req.m_lane_mode = 2'b00; // 1-bit lane
-        finish_item(req);
-
-        `uvm_info("SMOKE", $sformatf("WR_CSR response: status=0x%02h", req.m_resp_status), UVM_LOW)
-        if (req.m_resp_status != 8'h00) begin
-            `uvm_error("SMOKE", $sformatf("WR_CSR failed with status=0x%02h", req.m_resp_status))
-        end
-
-        #500ns;
-
-        // Test 2: Read back CTRL register
-        `uvm_info("SMOKE", "=== Test 2: RD_CSR from CTRL (0x04) ===", UVM_LOW)
-        req = spi_xtn::type_id::create("req2");
-        start_item(req, , p_sequencer.m_spi_seqr);
-        req.m_opcode    = 8'h11; // RD_CSR
-        req.m_reg_addr  = 8'h04;
-        req.m_lane_mode = 2'b00;
-        finish_item(req);
-
-        `uvm_info("SMOKE", $sformatf("RD_CSR response: status=0x%02h rdata=0x%08h has_rdata=%0b",
-                  req.m_resp_status, req.m_resp_rdata, req.m_resp_has_rdata), UVM_LOW)
-
-        if (req.m_resp_status != 8'h00) begin
-            `uvm_error("SMOKE", $sformatf("RD_CSR CTRL failed with status=0x%02h", req.m_resp_status))
-        end else if (req.m_resp_has_rdata && req.m_resp_rdata !== 32'hDEAD_BEEF) begin
-            `uvm_error("SMOKE", $sformatf("CTRL readback mismatch: expected 0xDEADBEEF, got 0x%08h", req.m_resp_rdata))
+        // Phase 1: 1-bit mode (DUT reset default)
+        // Write CTRL to enable DUT: en=1, lane_mode=16-bit, test_mode=1
+        `uvm_info(get_type_name(), "Test 1 (1-bit): WR_CSR CTRL = 0x111", UVM_LOW)
+        send_wr_csr(8'h04, 32'h0000_0111, LANE_1BIT, status);
+        if (status == 8'h00) begin
+            `uvm_info(get_type_name(), "  PASS: CTRL write STS_OK", UVM_LOW)
+            pass_cnt++;
         end else begin
-            `uvm_info("SMOKE", "CTRL readback PASSED!", UVM_LOW)
+            `uvm_error(get_type_name(), $sformatf("  FAIL: CTRL write status=0x%02h", status))
+            fail_cnt++;
         end
 
-        #500ns;
-
-        // Test 3: Read VERSION register (RO, addr=0x00)
-        `uvm_info("SMOKE", "=== Test 3: RD_CSR from VERSION (0x00) ===", UVM_LOW)
-        req = spi_xtn::type_id::create("req3");
-        start_item(req, , p_sequencer.m_spi_seqr);
-        req.m_opcode    = 8'h11; // RD_CSR
-        req.m_reg_addr  = 8'h00;
-        req.m_lane_mode = 2'b00;
-        finish_item(req);
-
-        `uvm_info("SMOKE", $sformatf("RD_CSR VERSION response: status=0x%02h rdata=0x%08h",
-                  req.m_resp_status, req.m_resp_rdata), UVM_LOW)
-
-        if (req.m_resp_status != 8'h00) begin
-            `uvm_error("SMOKE", $sformatf("RD_CSR VERSION failed with status=0x%02h", req.m_resp_status))
-        end else if (req.m_resp_has_rdata) begin
-            `uvm_info("SMOKE", $sformatf("VERSION = 0x%08h (readback check)", req.m_resp_rdata), UVM_LOW)
+        // Verify CTRL in 1-bit mode first (to confirm write committed)
+        `uvm_info(get_type_name(), "Test 2 (1-bit): RD_CSR CTRL", UVM_LOW)
+        send_rd_csr(8'h04, LANE_1BIT, status, rdata);
+        if (status == 8'h00 && rdata == 32'h0000_0111) begin
+            `uvm_info(get_type_name(), $sformatf("  PASS: CTRL=0x%08h (1-bit)", rdata), UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: CTRL (1-bit) status=0x%02h rdata=0x%08h (expected 0x00000111)", status, rdata))
+            fail_cnt++;
         end
 
-        // Allow drain time
-        #1us;
+        // Phase 2: 16-bit mode (DUT now configured for 16-bit)
+        // Verify CTRL in 16-bit mode
+        `uvm_info(get_type_name(), "Test 3 (16-bit): RD_CSR CTRL", UVM_LOW)
+        send_rd_csr(8'h04, LANE_16BIT, status, rdata);
+        if (status == 8'h00 && rdata == 32'h0000_0111) begin
+            `uvm_info(get_type_name(), $sformatf("  PASS: CTRL=0x%08h (16-bit)", rdata), UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: CTRL (16-bit) status=0x%02h rdata=0x%08h (expected 0x00000111)", status, rdata))
+            fail_cnt++;
+        end
+
+        // Read VERSION
+        `uvm_info(get_type_name(), "Test 4 (16-bit): RD_CSR VERSION", UVM_LOW)
+        send_rd_csr(8'h00, LANE_16BIT, status, rdata);
+        if (status == 8'h00) begin
+            `uvm_info(get_type_name(), $sformatf("  PASS: VERSION=0x%08h", rdata), UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: VERSION status=0x%02h", status))
+            fail_cnt++;
+        end
+
+        // Read STATUS
+        `uvm_info(get_type_name(), "Test 5 (16-bit): RD_CSR STATUS", UVM_LOW)
+        send_rd_csr(8'h08, LANE_16BIT, status, rdata);
+        if (status == 8'h00) begin
+            `uvm_info(get_type_name(), $sformatf("  PASS: STATUS=0x%08h", rdata), UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: STATUS status=0x%02h", status))
+            fail_cnt++;
+        end
+
+        // Read LAST_ERR
+        `uvm_info(get_type_name(), "Test 6 (16-bit): RD_CSR LAST_ERR", UVM_LOW)
+        send_rd_csr(8'h0C, LANE_16BIT, status, rdata);
+        if (status == 8'h00) begin
+            `uvm_info(get_type_name(), $sformatf("  PASS: LAST_ERR=0x%08h", rdata), UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: LAST_ERR status=0x%02h", status))
+            fail_cnt++;
+        end
+
+        // Read BURST_CNT
+        `uvm_info(get_type_name(), "Test 7 (16-bit): RD_CSR BURST_CNT", UVM_LOW)
+        send_rd_csr(8'h10, LANE_16BIT, status, rdata);
+        if (status == 8'h00) begin
+            `uvm_info(get_type_name(), $sformatf("  PASS: BURST_CNT=0x%08h", rdata), UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: BURST_CNT status=0x%02h", status))
+            fail_cnt++;
+        end
+
+        // AHB WR/RD
+        `uvm_info(get_type_name(), "Test 8 (16-bit): AHB_WR32/AHB_RD32", UVM_LOW)
+        send_ahb_wr32(32'h0001_0000, 32'hDEAD_BEEF, LANE_16BIT, status);
+        if (status == 8'h00) begin
+            `uvm_info(get_type_name(), "  PASS: AHB_WR32 STS_OK", UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: AHB_WR32 status=0x%02h", status))
+            fail_cnt++;
+        end
+        send_ahb_rd32(32'h0001_0000, LANE_16BIT, status, rdata);
+        if (status == 8'h00) begin
+            `uvm_info(get_type_name(), $sformatf("  PASS: AHB_RD32 STS_OK, rdata=0x%08h", rdata), UVM_LOW)
+            pass_cnt++;
+        end else begin
+            `uvm_error(get_type_name(), $sformatf("  FAIL: AHB_RD32 status=0x%02h", status))
+            fail_cnt++;
+        end
+
+        // Summary
+        `uvm_info(get_type_name(), $sformatf("=== Smoke Test Summary: PASS=%0d FAIL=%0d ===", pass_cnt, fail_cnt), UVM_NONE)
+        if (fail_cnt > 0) begin
+            `uvm_error(get_type_name(), "SMOKE TEST FAILED")
+        end else begin
+            `uvm_info(get_type_name(), "SMOKE TEST PASSED", UVM_NONE)
+        end
     endtask
 
 endclass

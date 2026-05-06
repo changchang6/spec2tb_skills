@@ -1,5 +1,3 @@
-// CSR Agent Package
-
 package csr_agent_pkg;
 
     import uvm_pkg::*;

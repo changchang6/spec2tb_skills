@@ -1,6 +1,4 @@
-// SPI Sequencer
-
-class spi_sequencer extends uvm_sequencer#(spi_xtn);
+class spi_sequencer extends uvm_sequencer #(spi_xtn);
 
     `uvm_component_utils(spi_sequencer)
 

@@ -1,36 +1,34 @@
-// SPI Interface for APLC_LITE
-// Matches DUT serial port: pcs_n_i, pdi_i[15:0], pdo_o[15:0], pdo_oe_o, lane_mode_i[1:0]
-
-interface spi_intf(input logic clk_i);
+// APLC-Lite External Test IO Interface (SPI-like, half-duplex)
+interface spi_intf(input logic clk_i, input logic rst_n_i);
 
     logic        pcs_n;
     logic [15:0] pdi;
     logic [15:0] pdo;
     logic        pdo_oe;
     logic [1:0]  lane_mode;
+    logic        en;
+    logic        test_mode;
 
-    // Driver clocking block: TB drives pcs_n, pdi, lane_mode; observes pdo, pdo_oe
-    // output #1step drives signal just before clock edge so DUT can sample it
+    // FIFO status (passive observation)
+    logic        rxfifo_empty;
+    logic        rxfifo_full;
+    logic        txfifo_empty;
+    logic        txfifo_full;
+
     clocking drv_cb @(posedge clk_i);
-        default input #1 output #1step;
-        output pcs_n;
-        output pdi;
-        output lane_mode;
-        input  pdo;
-        input  pdo_oe;
+        default input #1step output #1step;
+        output  pcs_n, pdi, lane_mode, en, test_mode;
+        input   pdo, pdo_oe;
+        input   rxfifo_empty, rxfifo_full, txfifo_empty, txfifo_full;
     endclocking
 
-    // Monitor clocking block: observes all signals
     clocking mon_cb @(posedge clk_i);
-        default input #1 output #0;
-        input pcs_n;
-        input pdi;
-        input pdo;
-        input pdo_oe;
-        input lane_mode;
+        default input #1step;
+        input  pcs_n, pdi, pdo, pdo_oe, lane_mode, en, test_mode;
+        input  rxfifo_empty, rxfifo_full, txfifo_empty, txfifo_full;
     endclocking
 
-    modport DRV_MP(clocking drv_cb);
-    modport MON_MP(clocking mon_cb);
+    modport drv_mp(clocking drv_cb);
+    modport mon_mp(clocking mon_cb);
 
 endinterface

@@ -1,6 +1,4 @@
-// CSR Sequencer
-
-class csr_sequencer extends uvm_sequencer#(csr_xtn);
+class csr_sequencer extends uvm_sequencer #(csr_xtn);
 
     `uvm_component_utils(csr_sequencer)
 

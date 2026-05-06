@@ -1,5 +1,3 @@
-// APLC Register Package
-
 package aplc_reg_pkg;
 
     import uvm_pkg::*;

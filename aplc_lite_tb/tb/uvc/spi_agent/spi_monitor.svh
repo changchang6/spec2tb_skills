@@ -1,148 +1,178 @@
-// SPI Monitor for APLC_LITE
-// Passively observes SPI bus, reconstructs command + response transactions
-
+// APLC-Lite SPI Monitor
+// Observes the external test IO interface and creates transactions
 class spi_monitor extends uvm_monitor;
 
     `uvm_component_utils(spi_monitor)
 
-    virtual spi_intf.MON_MP m_vif;
-    spi_config m_cfg;
-    uvm_analysis_port#(spi_xtn) m_ap;
+    uvm_analysis_port #(spi_xtn) ap;
+    virtual spi_intf.mon_mp vif;
+    spi_config m_config;
 
     function new(string name = "spi_monitor", uvm_component parent = null);
         super.new(name, parent);
-        m_ap = new("m_ap", this);
     endfunction
 
     function void build_phase(uvm_phase phase);
-        if (!uvm_config_db#(spi_config)::get(this, "", "spi_config", m_cfg)) begin
-            `uvm_fatal(get_type_name(), "Cannot get spi_config from config_db")
-        end
+        super.build_phase(phase);
+        ap = new("ap", this);
+        if (!uvm_config_db #(spi_config)::get(this, "", "spi_config", m_config))
+            `uvm_fatal(get_type_name(), "spi_config not found")
     endfunction
 
     function void connect_phase(uvm_phase phase);
-        m_vif = m_cfg.m_vif;
+        super.connect_phase(phase);
+        if (!uvm_config_db #(virtual spi_intf.mon_mp)::get(this, "", "vif", vif))
+            `uvm_fatal(get_type_name(), "vif not found")
     endfunction
 
     task run_phase(uvm_phase phase);
         forever begin
-            @(m_vif.mon_cb);
-            if (!m_vif.mon_cb.pcs_n) begin
-                observe_frame();
+            @(vif.mon_cb);
+            if (vif.mon_cb.pcs_n === 1'b0) begin
+                capture_frame();
             end
         end
     endtask
 
-    task observe_frame();
-        logic [79:0] tx_shift;
+    task capture_frame();
+        spi_xtn xtn;
         logic [79:0] rx_shift;
-        int          tx_bit_count;
-        int          rx_bit_count;
-        int          lane_width;
-        int          cycle_count;
-        logic [7:0]  opcode;
-        spi_xtn      txn;
+        int unsigned rx_count;
+        int unsigned bpc;
+        logic [7:0]  opcode_latched;
+        int unsigned expected_bits;
+        bit frame_valid;
+        int timeout_cnt;
 
-        tx_shift = '0;
-        rx_shift = '0;
-        cycle_count = 0;
-        lane_width = (1 << m_vif.mon_cb.lane_mode);
+        xtn = spi_xtn::type_id::create("xtn");
+        xtn.lane_mode = vif.mon_cb.lane_mode;
+        bpc = get_bpc(xtn.lane_mode);
 
-        while (!m_vif.mon_cb.pcs_n) begin
-            logic [15:0] pdi_data;
-            pdi_data = m_vif.mon_cb.pdi;
+        rx_shift = 80'b0;
+        rx_count = 0;
+        expected_bits = 0;
+        opcode_latched = 8'h00;
+        frame_valid = 0;
 
-            case (lane_width)
-                1:  tx_shift = {tx_shift[78:0], pdi_data[0]};
-                4:  tx_shift = {tx_shift[75:0], pdi_data[3:0]};
-                8:  tx_shift = {tx_shift[71:0], pdi_data[7:0]};
-                16: tx_shift = {tx_shift[63:0], pdi_data[15:0]};
+        // Capture request phase
+        while (vif.mon_cb.pcs_n === 1'b0) begin
+            case (bpc)
+                16: rx_shift = {rx_shift[63:0], vif.mon_cb.pdi};
+                 8: rx_shift = {rx_shift[71:0], vif.mon_cb.pdi[15:8]};
+                 4: rx_shift = {rx_shift[75:0], vif.mon_cb.pdi[15:12]};
+                 1: rx_shift = {rx_shift[78:0], vif.mon_cb.pdi[0]};
             endcase
-            cycle_count++;
-            @(m_vif.mon_cb);
+            rx_count += bpc;
+
+            if (rx_count >= 8 && opcode_latched == 8'h00) begin
+                opcode_latched = rx_shift[79:72];
+                xtn.opcode = opcode_latched;
+                expected_bits = get_expected_bits(opcode_latched);
+            end
+
+            if (expected_bits > 0 && rx_count >= expected_bits && !frame_valid) begin
+                frame_valid = 1;
+                parse_frame(xtn, rx_shift, opcode_latched);
+            end
+
+            @(vif.mon_cb);
         end
 
-        tx_bit_count = cycle_count * lane_width;
-        opcode = tx_shift[79:72];
+        if (frame_valid) begin
+            // Wait for response phase (pdo_oe goes high after turnaround)
+            timeout_cnt = 0;
+            while (vif.mon_cb.pdo_oe !== 1'b1 && timeout_cnt < 10000) begin
+                @(vif.mon_cb);
+                timeout_cnt++;
+            end
 
-        case (opcode)
-            8'h10: tx_bit_count = 48;   // WR_CSR
-            8'h11: tx_bit_count = 16;   // RD_CSR
-            8'h20: tx_bit_count = 72;   // AHB_WR32
-            8'h21: tx_bit_count = 40;   // AHB_RD32
-            8'h22: tx_bit_count = 48;   // AHB_WR_BURST header
-            8'h23: tx_bit_count = 48;   // AHB_RD_BURST header
-            default: tx_bit_count = cycle_count * lane_width;
+            if (vif.mon_cb.pdo_oe === 1'b1) begin
+                capture_response(xtn, bpc);
+            end
+
+            `uvm_info(get_type_name(), $sformatf("Captured: opcode=0x%02h status=0x%02h rdata=0x%08h",
+                xtn.opcode, xtn.status, xtn.rdata), UVM_HIGH)
+        end
+
+        ap.write(xtn);
+    endtask
+
+    task capture_response(spi_xtn xtn, int unsigned bpc);
+        logic [559:0] resp_shift;
+        int unsigned bits_captured;
+        int unsigned resp_bits;
+        logic [15:0] pdo_chunk;
+
+        case (xtn.opcode)
+            8'h11:         resp_bits = 40; // RD_CSR
+            8'h21:         resp_bits = 40; // AHB_RD32
+            8'h23:         resp_bits = 8 + 32 * xtn.burst_len; // AHB_RD_BURST
+            default:       resp_bits = 8;
         endcase
 
-        if (cycle_count * lane_width > tx_bit_count) begin
-            tx_shift = tx_shift << (cycle_count * lane_width - tx_bit_count);
+        resp_shift = 560'b0;
+        bits_captured = 0;
+        while (bits_captured < resp_bits && vif.mon_cb.pdo_oe === 1'b1) begin
+            pdo_chunk = vif.mon_cb.pdo;
+            case (bpc)
+                16: resp_shift = {resp_shift[543:0], pdo_chunk};
+                 8: resp_shift = {resp_shift[551:0], pdo_chunk[15:8]};
+                 4: resp_shift = {resp_shift[555:0], pdo_chunk[15:12]};
+                 1: resp_shift = {resp_shift[558:0], pdo_chunk[0]};
+            endcase
+            bits_captured += bpc;
+            @(vif.mon_cb);
         end
 
-        txn = spi_xtn::type_id::create("txn");
-        txn.m_opcode    = opcode;
-        txn.m_lane_mode = m_vif.mon_cb.lane_mode;
+        xtn.status = resp_shift[559:552];
+        if (resp_bits > 8) begin
+            xtn.rdata = resp_shift[551:520];
+        end
+    endtask
 
+    function void parse_frame(spi_xtn xtn, logic [79:0] rx_shift, logic [7:0] opcode);
         case (opcode)
             8'h10: begin // WR_CSR
-                txn.m_reg_addr = tx_shift[71:64];
-                txn.m_wdata    = tx_shift[63:32];
+                xtn.reg_addr = rx_shift[71:64];
+                xtn.wdata    = rx_shift[63:32];
             end
             8'h11: begin // RD_CSR
-                txn.m_reg_addr = tx_shift[71:64];
+                xtn.reg_addr = rx_shift[71:64];
             end
             8'h20: begin // AHB_WR32
-                txn.m_addr  = tx_shift[63:32];
-                txn.m_wdata = tx_shift[31:0];
+                xtn.addr  = rx_shift[71:40];
+                xtn.wdata = rx_shift[39:8];
             end
             8'h21: begin // AHB_RD32
-                txn.m_addr = tx_shift[63:32];
+                xtn.addr = rx_shift[71:40];
             end
-            8'h22, 8'h23: begin // AHB_WR_BURST / AHB_RD_BURST
-                txn.m_burst_len = tx_shift[74:70];
-                txn.m_addr      = tx_shift[63:32];
+            8'h22, 8'h23: begin // AHB_WR_BURST, AHB_RD_BURST
+                xtn.burst_len = rx_shift[71:67];
+                xtn.addr      = rx_shift[63:32];
             end
         endcase
+    endfunction
 
-        rx_bit_count = txn.get_rx_bit_count();
+    function int get_bpc(logic [1:0] lane_mode);
+        case (lane_mode)
+            2'b00: return 1;
+            2'b01: return 4;
+            2'b10: return 8;
+            2'b11: return 16;
+        endcase
+        return 16;
+    endfunction
 
-        if (rx_bit_count > 0) begin
-            int rx_cycles;
-
-            cycle_count = 0;
-            while (!m_vif.mon_cb.pdo_oe && cycle_count < 5000) begin
-                @(m_vif.mon_cb);
-                cycle_count++;
-            end
-
-            rx_cycles = 0;
-            while (m_vif.mon_cb.pdo_oe && rx_cycles * lane_width < rx_bit_count + lane_width) begin
-                logic [15:0] pdo_data;
-                pdo_data = m_vif.mon_cb.pdo;
-
-                case (lane_width)
-                    1:  rx_shift = {rx_shift[78:0], pdo_data[0]};
-                    4:  rx_shift = {rx_shift[75:0], pdo_data[3:0]};
-                    8:  rx_shift = {rx_shift[71:0], pdo_data[7:0]};
-                    16: rx_shift = {rx_shift[63:0], pdo_data[15:0]};
-                endcase
-                rx_cycles++;
-                @(m_vif.mon_cb);
-            end
-
-            if (rx_cycles * lane_width > rx_bit_count) begin
-                rx_shift = rx_shift << (rx_cycles * lane_width - rx_bit_count);
-            end
-
-            txn.m_resp_status = rx_shift[79:72];
-            if (rx_bit_count > 8) begin
-                txn.m_resp_rdata  = rx_shift[71:40];
-                txn.m_resp_has_rdata = 1'b1;
-            end
-        end
-
-        `uvm_info(get_type_name(), $sformatf("Observed: %s", txn.convert2string()), UVM_HIGH)
-        m_ap.write(txn);
-    endtask
+    function int get_expected_bits(logic [7:0] opcode);
+        case (opcode)
+            8'h10: return 48;
+            8'h11: return 16;
+            8'h20: return 72;
+            8'h21: return 40;
+            8'h22: return 48;
+            8'h23: return 48;
+            default: return 80;
+        endcase
+    endfunction
 
 endclass

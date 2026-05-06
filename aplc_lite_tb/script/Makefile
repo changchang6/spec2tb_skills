@@ -11,9 +11,8 @@ VCS       = vcs
 VERDI     = verdi
 
 SCRIPT_DIR    := $(shell pwd)
-APLC_TB_HOME  := $(SCRIPT_DIR)/..
-APLC_RTL_HOME := $(HOME)/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl
-AHB_VIP_HOME  := $(APLC_TB_HOME)/../vip/AHB2
+APLC_TB_HOME  := $(SCRIPT_DIR)/../..
+APLC_RTL_HOME := $(SCRIPT_DIR)/../../../../rtm_gen/APLC-Lite/rtl
 
 export APLC_TB_HOME
 export APLC_RTL_HOME
@@ -34,19 +33,16 @@ VCS_COMP_OPTS = \
     -debug_access+all \
     -kdb \
     -lca \
-    +incdir+$(APLC_TB_HOME)/tb/if \
-    +incdir+$(APLC_TB_HOME)/tb/uvc \
-    +incdir+$(APLC_TB_HOME)/tb/uvc/spi_agent \
-    +incdir+$(APLC_TB_HOME)/tb/uvc/csr_agent \
-    +incdir+$(APLC_TB_HOME)/tb/env \
-    +incdir+$(APLC_TB_HOME)/seq \
-    +incdir+$(APLC_TB_HOME)/tc \
-    +incdir+$(APLC_TB_HOME)/reg \
-    +incdir+$(AHB_VIP_HOME)/ahb_test \
-    +incdir+$(AHB_VIP_HOME)/ahb_slv_agent \
+    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/if \
+    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/uvc/spi_agent \
+    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/uvc/csr_agent \
+    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/env \
+    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/seq \
+    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tc \
+    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/reg \
     -timescale=1ns/1ps \
     -ntb_opts uvm-1.2 \
-    +define+UVM_NO_DPI \
+    +define+YUU_UVM \
     -LDFLAGS -Wl,--no-as-needed \
     -l compile.log
 
@@ -81,13 +77,15 @@ endif
 
 comp:
 	@mkdir -p $(SIM_DIR)
-	cd $(SIM_DIR) && $(VCS) $(VCS_COMP_OPTS) -f $(APLC_TB_HOME)/filelist/aplc_verif.f
+	sed -e 's|APLC_TB_HOME|$(APLC_TB_HOME)|g' -e 's|APLC_RTL_HOME|$(APLC_RTL_HOME)|g' \
+	    $(APLC_TB_HOME)/aplc_lite_tb/filelist/aplc_verif.f > $(SIM_DIR)/aplc_verif_resolved.f
+	cd $(SIM_DIR) && $(VCS) $(VCS_COMP_OPTS) -f aplc_verif_resolved.f
 
 sim: comp
 	cd $(SIM_DIR) && ./simv $(VCS_SIM_OPTS)
 
 wave:
-	cd $(SIM_DIR) && $(VERDI) -f $(APLC_TB_HOME)/filelist/aplc_verif.f -ssf $(WAVE_FSDB) -top aplc_tb_top -nologo &
+	cd $(SIM_DIR) && $(VERDI) -f aplc_verif_resolved.f -ssf $(WAVE_FSDB) -top aplc_tb_top -nologo &
 
 cov_report:
 	cd $(SIM_DIR) && urg -dir simv.vdb -report cov_report
