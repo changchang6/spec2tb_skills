@@ -1,21 +1,15 @@
 # APLC-Lite UVM Testbench Makefile
-# Usage:
-#   make comp        - Compile the testbench
-#   make sim         - Compile and run default test
-#   make sim TEST=xx - Run specific test
-#   make wave        - Open Verdi to view waveform of last simulation
-#   make clean       - Clean build artifacts
-
-# -------------------- Configuration --------------------
 VCS       = vcs
 VERDI     = verdi
 
 SCRIPT_DIR    := $(shell pwd)
-APLC_TB_HOME  := $(SCRIPT_DIR)/../..
-APLC_RTL_HOME := $(SCRIPT_DIR)/../../../../rtm_gen/APLC-Lite/rtl
+APLC_TB_HOME  := $(SCRIPT_DIR)/..
+APLC_RTL_HOME := $(HOME)/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl
+VIP_AHB_HOME  := $(SCRIPT_DIR)/../../vip/yuu_ahb
 
 export APLC_TB_HOME
 export APLC_RTL_HOME
+export VIP_AHB_HOME
 
 TEST     ?= aplc_smoke_test
 SEED     ?= $(shell date +%s)
@@ -33,16 +27,24 @@ VCS_COMP_OPTS = \
     -debug_access+all \
     -kdb \
     -lca \
-    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/if \
-    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/uvc/spi_agent \
-    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/uvc/csr_agent \
-    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tb/env \
-    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/seq \
-    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/tc \
-    +incdir+$(APLC_TB_HOME)/aplc_lite_tb/reg \
+    +incdir+$(APLC_TB_HOME)/tb/if \
+    +incdir+$(APLC_TB_HOME)/tb/uvc/spi_agent \
+    +incdir+$(APLC_TB_HOME)/tb/uvc/csr_agent \
+    +incdir+$(APLC_TB_HOME)/tb/env \
+    +incdir+$(APLC_TB_HOME)/seq \
+    +incdir+$(APLC_TB_HOME)/tc \
+    +incdir+$(APLC_TB_HOME)/reg \
+    +incdir+$(VIP_AHB_HOME)/include \
+    +incdir+$(VIP_AHB_HOME)/pkg/yuu_common/include \
+    +incdir+$(VIP_AHB_HOME)/pkg/yuu_amba/include \
+    +incdir+$(VIP_AHB_HOME)/src/sv \
+    +incdir+$(VIP_AHB_HOME)/seq \
     -timescale=1ns/1ps \
     -ntb_opts uvm-1.2 \
+    +define+UVM_NO_DPI \
     +define+YUU_UVM \
+    +define+YUU_AHB_MAX_MASTER_NUM=0 \
+    +define+YUU_AHB_MAX_SLAVE_NUM=1 \
     -LDFLAGS -Wl,--no-as-needed \
     -l compile.log
 
@@ -77,15 +79,13 @@ endif
 
 comp:
 	@mkdir -p $(SIM_DIR)
-	sed -e 's|APLC_TB_HOME|$(APLC_TB_HOME)|g' -e 's|APLC_RTL_HOME|$(APLC_RTL_HOME)|g' \
-	    $(APLC_TB_HOME)/aplc_lite_tb/filelist/aplc_verif.f > $(SIM_DIR)/aplc_verif_resolved.f
-	cd $(SIM_DIR) && $(VCS) $(VCS_COMP_OPTS) -f aplc_verif_resolved.f
+	cd $(SIM_DIR) && $(VCS) $(VCS_COMP_OPTS) -f $(APLC_TB_HOME)/filelist/aplc_verif.f
 
 sim: comp
 	cd $(SIM_DIR) && ./simv $(VCS_SIM_OPTS)
 
 wave:
-	cd $(SIM_DIR) && $(VERDI) -f aplc_verif_resolved.f -ssf $(WAVE_FSDB) -top aplc_tb_top -nologo &
+	cd $(SIM_DIR) && $(VERDI) -f $(APLC_TB_HOME)/filelist/aplc_verif.f -ssf $(WAVE_FSDB) -top tb -nologo &
 
 cov_report:
 	cd $(SIM_DIR) && urg -dir simv.vdb -report cov_report

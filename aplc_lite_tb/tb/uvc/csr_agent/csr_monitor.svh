@@ -1,49 +1,49 @@
-// CSR Monitor
-// Observes CSR interface transactions
 class csr_monitor extends uvm_monitor;
 
     `uvm_component_utils(csr_monitor)
 
+    virtual csr_if m_vif;
+    csr_config     m_cfg;
     uvm_analysis_port #(csr_xtn) ap;
-    virtual csr_intf.mon_mp vif;
 
-    function new(string name = "csr_monitor", uvm_component parent = null);
+    function new(string name, uvm_component parent);
         super.new(name, parent);
     endfunction
 
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
+        if (!uvm_config_db#(csr_config)::get(this, "", "cfg", m_cfg))
+            `uvm_fatal(get_type_name(), "Cannot get csr_config")
+        m_vif = m_cfg.m_vif;
         ap = new("ap", this);
     endfunction
 
-    function void connect_phase(uvm_phase phase);
-        super.connect_phase(phase);
-        if (!uvm_config_db #(virtual csr_intf.mon_mp)::get(this, "", "vif", vif))
-            `uvm_fatal(get_type_name(), "vif not found")
-    endfunction
-
     task run_phase(uvm_phase phase);
-        csr_xtn xtn;
+        bit rd_en_d1;
+        bit [7:0] addr_d1;
+
+        rd_en_d1 = 1'b0;
+        addr_d1  = 8'b0;
         forever begin
-            @(vif.mon_cb);
-            if (vif.mon_cb.csr_wr_en === 1'b1) begin
-                xtn = csr_xtn::type_id::create("xtn");
+            @(m_vif.mon_cb);
+            // Capture write transaction
+            if (m_vif.mon_cb.csr_wr_en) begin
+                csr_xtn xtn = csr_xtn::type_id::create("wr_xtn");
                 xtn.is_write = 1'b1;
-                xtn.addr  = vif.mon_cb.csr_addr;
-                xtn.wdata = vif.mon_cb.csr_wdata;
-                `uvm_info(get_type_name(), $sformatf("Observed: %s", xtn.convert2string()), UVM_HIGH)
+                xtn.addr     = m_vif.mon_cb.csr_addr;
+                xtn.wdata    = m_vif.mon_cb.csr_wdata;
                 ap.write(xtn);
             end
-            if (vif.mon_cb.csr_rd_en === 1'b1) begin
-                xtn = csr_xtn::type_id::create("xtn");
+            // Capture read transaction (rdata available 1 cycle after rd_en)
+            if (rd_en_d1) begin
+                csr_xtn xtn = csr_xtn::type_id::create("rd_xtn");
                 xtn.is_write = 1'b0;
-                xtn.addr  = vif.mon_cb.csr_addr;
-                // rdata is valid next cycle, capture it then
-                @(vif.mon_cb);
-                xtn.rdata = vif.mon_cb.csr_rdata;
-                `uvm_info(get_type_name(), $sformatf("Observed: %s", xtn.convert2string()), UVM_HIGH)
+                xtn.addr     = addr_d1;
+                xtn.rdata    = m_vif.mon_cb.csr_rdata;
                 ap.write(xtn);
             end
+            rd_en_d1 = m_vif.mon_cb.csr_rd_en;
+            addr_d1  = m_vif.mon_cb.csr_addr;
         end
     endtask
 

@@ -1,171 +1,231 @@
-// APLC-Lite Top Testbench
-module aplc_tb_top;
+// APLC-Lite Testbench Top Module
+module tb;
 
     import uvm_pkg::*;
     `include "uvm_macros.svh"
+    import aplc_tc_pkg::*;
+    import yuu_ahb_pkg::*;
 
-    // -------------------- Parameters --------------------
-    parameter CLK_PERIOD = 10; // 100 MHz
+    // -------------------- Clock & Reset --------------------
+    logic clk;
+    logic rst_n;
 
-    // -------------------- Signals --------------------
-    logic        clk;
-    logic        rst_n;
-
-    // -------------------- Interfaces --------------------
-    spi_intf  spi_if_inst(.clk_i(clk), .rst_n_i(rst_n));
-    csr_intf  csr_if_inst(.clk_i(clk), .rst_n_i(rst_n));
-
-    // AHB VIP interface
-    `define YUU_AHB_MAX_MASTER_NUM 1
-    `define YUU_AHB_MAX_SLAVE_NUM  1
-    `define YUU_AHB_MAX_ADDR_WIDTH 32
-    `define YUU_AHB_MAX_DATA_WIDTH 32
-    `define YUU_AHB_SLAVE_SETUP_TIME 0
-    `define YUU_AHB_SLAVE_HOLD_TIME  0
-
-    yuu_ahb_interface ahb_if_inst();
-
-    // -------------------- Clock Generation --------------------
     initial begin
         clk = 0;
-        forever #(CLK_PERIOD/2) clk = ~clk;
+        forever #5ns clk = ~clk; // 100MHz
     end
 
-    // -------------------- Reset Generation --------------------
     initial begin
         rst_n = 0;
         #200ns;
         rst_n = 1;
     end
 
-    // -------------------- AHB VIP clock/reset --------------------
-    assign ahb_if_inst.hclk     = clk;
-    assign ahb_if_inst.hreset_n = rst_n;
+    // -------------------- DUT Signals --------------------
+    logic        en_i;
+    logic        test_mode_i;
+    logic [1:0]  lane_mode_i;
+    logic        pcs_n_i;
+    logic [15:0] pdi_i;
+    logic [15:0] pdo_o;
+    logic        pdo_oe_o;
+    logic        rxfifo_empty_o;
+    logic        rxfifo_full_o;
+    logic        txfifo_empty_o;
+    logic        txfifo_full_o;
+    logic        csr_rd_en_o;
+    logic        csr_wr_en_o;
+    logic [7:0]  csr_addr_o;
+    logic [31:0] csr_wdata_o;
+    logic [31:0] csr_rdata_i;
+    logic [31:0] haddr_o;
+    logic        hwrite_o;
+    logic [1:0]  htrans_o;
+    logic [2:0]  hsize_o;
+    logic [2:0]  hburst_o;
+    logic [31:0] hwdata_o;
+    logic [31:0] hrdata_i;
+    logic        hready_i;
+    logic        hresp_i;
 
-    // -------------------- DUT Instance --------------------
+    // -------------------- Interfaces --------------------
+    spi_if spi_vif(.clk(clk), .rst_n(rst_n));
+    csr_if csr_vif(.clk(clk), .rst_n(rst_n));
+
+    // Connect SPI interface to DUT signals
+    assign pcs_n_i     = spi_vif.pcs_n;
+    assign pdi_i       = spi_vif.pdi;
+    assign en_i        = spi_vif.en;
+    assign test_mode_i = spi_vif.test_mode;
+    assign lane_mode_i = spi_vif.lane_mode;
+    assign spi_vif.pdo       = pdo_o;
+    assign spi_vif.pdo_oe   = pdo_oe_o;
+    assign spi_vif.rxfifo_empty = rxfifo_empty_o;
+    assign spi_vif.rxfifo_full  = rxfifo_full_o;
+    assign spi_vif.txfifo_empty = txfifo_empty_o;
+    assign spi_vif.txfifo_full  = txfifo_full_o;
+
+    // Connect CSR interface to DUT signals
+    // DUT drives rd_en/wr_en/addr/wdata (outputs), TB observes via interface
+    assign csr_vif.csr_rd_en  = csr_rd_en_o;
+    assign csr_vif.csr_wr_en  = csr_wr_en_o;
+    assign csr_vif.csr_addr   = csr_addr_o;
+    assign csr_vif.csr_wdata  = csr_wdata_o;
+    // TB drives rdata (DUT input), CSR agent responds via slv_cb
+    assign csr_rdata_i  = csr_vif.csr_rdata;
+
+    // AHB interface (VIP)
+    yuu_ahb_interface ahb_if();
+
+    // Connect AHB clock/reset
+    assign ahb_if.hclk    = clk;
+    assign ahb_if.hreset_n = rst_n;
+
+    // Connect DUT AHB master to VIP slave[0]
+    assign ahb_if.slave_if[0].hsel      = (htrans_o != 2'b00); // select when active
+    assign ahb_if.slave_if[0].haddr     = haddr_o;
+    assign ahb_if.slave_if[0].htrans    = htrans_o;
+    assign ahb_if.slave_if[0].hburst    = hburst_o;
+    assign ahb_if.slave_if[0].hwrite    = hwrite_o;
+    assign ahb_if.slave_if[0].hsize     = hsize_o;
+    assign ahb_if.slave_if[0].hwdata    = hwdata_o;
+    assign ahb_if.slave_if[0].hprot     = 4'b0011;
+    assign ahb_if.slave_if[0].hmaster   = 4'b0000;
+    assign ahb_if.slave_if[0].hmastlock = 1'b0;
+    assign ahb_if.slave_if[0].hnonsec   = 1'b0;
+
+    assign hrdata_i = ahb_if.slave_if[0].hrdata;
+    assign hresp_i  = ahb_if.slave_if[0].hresp[0]; // VIP hresp is 2-bit, DUT is 1-bit
+    assign hready_i = ahb_if.slave_if[0].hready_o;
+    assign ahb_if.slave_if[0].hready_i = ahb_if.slave_if[0].hready_o; // single slave loopback
+
+    // -------------------- DUT Instantiation --------------------
     APLC_LITE dut (
-        .clk_i           (clk),
-        .rst_n_i         (rst_n),
-        .en_i            (spi_if_inst.en),
-        .test_mode_i     (spi_if_inst.test_mode),
-        .pcs_n_i         (spi_if_inst.pcs_n),
-        .pdi_i           (spi_if_inst.pdi),
-        .pdo_o           (spi_if_inst.pdo),
-        .pdo_oe_o        (spi_if_inst.pdo_oe),
-        .lane_mode_i     (spi_if_inst.lane_mode),
-        .rxfifo_empty_o  (spi_if_inst.rxfifo_empty),
-        .rxfifo_full_o   (spi_if_inst.rxfifo_full),
-        .txfifo_empty_o  (spi_if_inst.txfifo_empty),
-        .txfifo_full_o   (spi_if_inst.txfifo_full),
-        .csr_rd_en_o     (csr_if_inst.csr_rd_en),
-        .csr_wr_en_o     (csr_if_inst.csr_wr_en),
-        .csr_addr_o      (csr_if_inst.csr_addr),
-        .csr_wdata_o     (csr_if_inst.csr_wdata),
-        .csr_rdata_i     (csr_if_inst.csr_rdata),
-        .haddr_o         (ahb_if_inst.slave_if[0].haddr[31:0]),
-        .hwrite_o        (ahb_if_inst.slave_if[0].hwrite),
-        .htrans_o        (ahb_if_inst.slave_if[0].htrans),
-        .hsize_o         (ahb_if_inst.slave_if[0].hsize),
-        .hburst_o        (ahb_if_inst.slave_if[0].hburst),
-        .hwdata_o        (ahb_if_inst.slave_if[0].hwdata[31:0]),
-        .hrdata_i        (ahb_if_inst.slave_if[0].hrdata[31:0]),
-        .hready_i        (ahb_if_inst.slave_if[0].hready_o),
-        .hresp_i         (ahb_if_inst.slave_if[0].hresp[0])
+        .clk_i          (clk),
+        .rst_n_i        (rst_n),
+        .en_i           (en_i),
+        .test_mode_i    (test_mode_i),
+        .pcs_n_i        (pcs_n_i),
+        .pdi_i          (pdi_i),
+        .pdo_o          (pdo_o),
+        .pdo_oe_o       (pdo_oe_o),
+        .lane_mode_i    (lane_mode_i),
+        .rxfifo_empty_o (rxfifo_empty_o),
+        .rxfifo_full_o  (rxfifo_full_o),
+        .txfifo_empty_o (txfifo_empty_o),
+        .txfifo_full_o  (txfifo_full_o),
+        .csr_rd_en_o    (csr_rd_en_o),
+        .csr_wr_en_o    (csr_wr_en_o),
+        .csr_addr_o     (csr_addr_o),
+        .csr_wdata_o    (csr_wdata_o),
+        .csr_rdata_i    (csr_rdata_i),
+        .haddr_o        (haddr_o),
+        .hwrite_o       (hwrite_o),
+        .htrans_o       (htrans_o),
+        .hsize_o        (hsize_o),
+        .hburst_o       (hburst_o),
+        .hwdata_o       (hwdata_o),
+        .hrdata_i       (hrdata_i),
+        .hready_i       (hready_i),
+        .hresp_i        (hresp_i)
     );
 
-    // AHB slave select (always selected for test)
-    assign ahb_if_inst.slave_if[0].hsel = 1'b1;
-    assign ahb_if_inst.slave_if[0].hready_i = 1'b1;
-
-    // -------------------- Debug: Track response data path --------------------
-    logic [559:0] dbg_resp_shift;
-    int           dbg_resp_bits;
-    always @(posedge clk) begin
-        if (rst_n && dut.u_taskallo.u_sctrl.state == 3'd3) begin // WAIT_RESP
-            $display("[FRONT_WAIT] %0t: rdata_reg=0x%08h resp_valid=%b resp_rdata=0x%08h resp_has_rdata=%b",
-                $time, dut.u_taskallo.u_sctrl.rdata_reg,
-                dut.u_taskallo.resp_valid_i, dut.u_taskallo.resp_rdata_i,
-                dut.u_taskallo.resp_has_rdata_i);
-        end
-        if (rst_n && dut.u_taskallo.u_sctrl.state == 3'd4) begin // TA
-            $display("[FRONT_TA] %0t: rdata_reg=0x%08h has_rdata=%b tx_start=%b",
-                $time, dut.u_taskallo.u_sctrl.rdata_reg,
-                dut.u_taskallo.u_sctrl.has_rdata_reg,
-                dut.u_taskallo.tx_start);
-        end
-        if (rst_n && dut.pdo_oe_o === 1'b1) begin
-            $display("[DUT_TX] %0t: saxis_shift=0x%010h saxis_cnt=%0d front_state=%0d rdata_reg=0x%08h has_rdata=%b lane=%b",
-                $time, dut.u_taskallo.u_saxis.tx_shift_q,
-                dut.u_taskallo.u_saxis.tx_count_q,
-                dut.u_taskallo.u_sctrl.state,
-                dut.u_taskallo.u_sctrl.rdata_reg,
-                dut.u_taskallo.u_sctrl.has_rdata_reg,
-                dut.lane_mode_i);
-        end
-        if (rst_n && dut.pdo_oe_o === 1'b0 && dbg_resp_bits > 0) begin
-            $display("[DUT_RESP] %0t: Response done, bits=%0d", $time, dbg_resp_bits);
-            dbg_resp_shift = 560'b0;
-            dbg_resp_bits = 0;
-        end
-        if (rst_n && dut.pdo_oe_o === 1'b1) begin
-            case (dut.lane_mode_i)
-                2'b11: begin
-                    dbg_resp_shift = {dbg_resp_shift[543:0], dut.pdo_o};
-                    dbg_resp_bits += 16;
-                end
-                2'b00: begin
-                    dbg_resp_shift = {dbg_resp_shift[558:0], dut.pdo_o[0]};
-                    dbg_resp_bits += 1;
-                end
-            endcase
-        end
-        if (!rst_n) begin
-            dbg_resp_shift = 560'b0;
-            dbg_resp_bits = 0;
-        end
-    end
-
-    // -------------------- Debug: Monitor CSR bus --------------------
-    always @(posedge clk) begin
-        if (rst_n && (csr_if_inst.csr_rd_en || csr_if_inst.csr_wr_en)) begin
-            $strobe("[CSR_DBG] %0t: %s addr=0x%02h wdata=0x%08h rdata=0x%08h",
-                $time,
-                csr_if_inst.csr_wr_en ? "WR" : "RD",
-                csr_if_inst.csr_addr,
-                csr_if_inst.csr_wdata,
-                csr_if_inst.csr_rdata);
-        end
+    // -------------------- UVM Initialization --------------------
+    initial begin
+        uvm_config_db#(virtual spi_if)::set(null, "uvm_test_top", "spi_vif", spi_vif);
+        uvm_config_db#(virtual csr_if)::set(null, "uvm_test_top", "csr_vif", csr_vif);
+        uvm_config_db#(virtual yuu_ahb_slave_interface)::set(null, "uvm_test_top",
+            "ahb_slv_vif", ahb_if.get_slave_if(0));
+        run_test();
     end
 
     // -------------------- Waveform Dump --------------------
     `ifdef DUMP_FSDB
     initial begin
         $fsdbDumpfile("aplc_tb.fsdb");
-        $fsdbDumpvars(0, aplc_tb_top);
+        $fsdbDumpvars(0, tb);
     end
     `endif
 
-    // -------------------- Timeout --------------------
+    // -------------------- Simulation Timeout --------------------
     initial begin
         #100ms;
-        $display("[FATAL] Simulation timeout at %0t", $time);
+        $display("[TB_TIMEOUT] Simulation timed out at %0t", $time);
         $finish;
     end
 
-    // -------------------- UVM Setup --------------------
-    initial begin
-        // Set interface handles in config_db
-        uvm_config_db #(virtual spi_intf)::set(null, "*", "spi_vif", spi_if_inst);
-        uvm_config_db #(virtual spi_intf.drv_mp)::set(null, "uvm_test_top.m_env.m_spi_agent.m_driver", "vif", spi_if_inst.drv_mp);
-        uvm_config_db #(virtual spi_intf.mon_mp)::set(null, "uvm_test_top.m_env.m_spi_agent.m_monitor", "vif", spi_if_inst.mon_mp);
-        uvm_config_db #(virtual csr_intf)::set(null, "*", "csr_vif", csr_if_inst);
-        uvm_config_db #(virtual csr_intf.drv_mp)::set(null, "uvm_test_top.m_env.m_csr_agent.m_driver", "vif", csr_if_inst.drv_mp);
-        uvm_config_db #(virtual csr_intf.mon_mp)::set(null, "uvm_test_top.m_env.m_csr_agent.m_monitor", "vif", csr_if_inst.mon_mp);
+    // =====================================================
+    // SVA Assertions (CHK_001, CHK_014, CHK_015)
+    // =====================================================
 
-        // AHB VIP interface
-        uvm_config_db #(virtual yuu_ahb_interface)::set(null, "*", "yuu_ahb_interface", ahb_if_inst);
+    // CHK_001: Reset state assertions
+    property p_reset_pdo_oe;
+        @(posedge clk) !rst_n |=> pdo_oe_o === 1'b0;
+    endproperty
+    assert property(p_reset_pdo_oe) else
+        $error("[CHK_001] Reset: pdo_oe_o not 0 after reset");
 
-        run_test();
-    end
+    property p_reset_htrans_idle;
+        @(posedge clk) !rst_n |=> htrans_o === 2'b00;
+    endproperty
+    assert property(p_reset_htrans_idle) else
+        $error("[CHK_001] Reset: htrans_o not IDLE after reset");
+
+    property p_reset_csr_idle;
+        @(posedge clk) !rst_n |=> csr_rd_en_o === 1'b0 && csr_wr_en_o === 1'b0;
+    endproperty
+    assert property(p_reset_csr_idle) else
+        $error("[CHK_001] Reset: CSR signals not idle after reset");
+
+    property p_reset_pdo_zero;
+        @(posedge clk) !rst_n |=> pdo_o === 16'b0;
+    endproperty
+    assert property(p_reset_pdo_zero) else
+        $error("[CHK_001] Reset: pdo_o not 0 after reset");
+
+    // CHK_015: AHB Master protocol assertions
+    property p_ahb_hsize_word;
+        @(posedge clk) rst_n && htrans_o != 2'b00 |-> hsize_o === 3'b010;
+    endproperty
+    assert property(p_ahb_hsize_word) else
+        $error("[CHK_015] AHB: hsize not WORD during active transfer");
+
+    property p_ahb_addr_aligned;
+        @(posedge clk) rst_n && htrans_o != 2'b00 |-> haddr_o[1:0] === 2'b00;
+    endproperty
+    assert property(p_ahb_addr_aligned) else
+        $error("[CHK_015] AHB: haddr not 4-byte aligned during active transfer");
+
+    property p_ahb_hburst_stable;
+        @(posedge clk) rst_n && htrans_o inside {2'b10, 2'b11} |-> $stable(hburst_o);
+    endproperty
+    assert property(p_ahb_hburst_stable) else
+        $error("[CHK_015] AHB: hburst changed during burst");
+
+    // CHK_014: Low power assertions
+    property p_idle_no_csr_access;
+        @(posedge clk) rst_n && pcs_n_i === 1'b1 |-> csr_rd_en_o === 1'b0 && csr_wr_en_o === 1'b0;
+    endproperty
+    assert property(p_idle_no_csr_access) else
+        $error("[CHK_014] Low power: CSR access during idle (pcs_n=1)");
+
+    property p_idle_htrans_idle;
+        @(posedge clk) rst_n && pcs_n_i === 1'b1 |-> htrans_o === 2'b00;
+    endproperty
+    assert property(p_idle_htrans_idle) else
+        $error("[CHK_014] Low power: AHB not IDLE during idle (pcs_n=1)");
+
+    // CHK_003: CSR timing assertions
+    property p_csr_wr_single_pulse;
+        @(posedge clk) rst_n |-> !(csr_wr_en_o && $past(csr_wr_en_o));
+    endproperty
+    assert property(p_csr_wr_single_pulse) else
+        $error("[CHK_003] CSR: wr_en not single-cycle pulse");
+
+    property p_csr_rd_single_pulse;
+        @(posedge clk) rst_n |-> !(csr_rd_en_o && $past(csr_rd_en_o));
+    endproperty
+    assert property(p_csr_rd_single_pulse) else
+        $error("[CHK_003] CSR: rd_en not single-cycle pulse");
 
 endmodule
