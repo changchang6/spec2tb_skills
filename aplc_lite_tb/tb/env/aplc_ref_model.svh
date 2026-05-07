@@ -188,9 +188,9 @@ class aplc_ref_model extends uvm_component;
         resp.is_ahb    = req.is_ahb;
         resp.is_burst  = req.is_burst;
         resp.lane_mode = req.lane_mode;
-        // Store predicted status in wdata[0] for scoreboard comparison
-        resp.wdata = new[1];
-        resp.wdata[0] = {24'b0, status};
+        resp.en        = req.en;
+        resp.test_mode = req.test_mode;
+        resp.status    = status;
         m_resp_exp_ap.write(resp);
     endfunction
 

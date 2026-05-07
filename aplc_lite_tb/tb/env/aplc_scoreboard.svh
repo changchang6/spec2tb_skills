@@ -81,13 +81,13 @@ class aplc_scoreboard extends uvm_scoreboard;
 
     function void write_resp_exp(spi_xtn xtn);
         `uvm_info(get_type_name(), $sformatf("RESP EXP: opcode=0x%02h status=0x%02h",
-            xtn.opcode, xtn.wdata.size() > 0 ? xtn.wdata[0][7:0] : 8'hFF), UVM_HIGH)
+            xtn.opcode, xtn.status), UVM_HIGH)
         m_resp_exp_fifo.write(xtn);
     endfunction
 
     function void write_resp_act(spi_xtn xtn);
-        `uvm_info(get_type_name(), $sformatf("RESP ACT: status=0x%02h",
-            xtn.wdata.size() > 0 ? xtn.wdata[0][7:0] : 8'hFF), UVM_HIGH)
+        `uvm_info(get_type_name(), $sformatf("RESP ACT: opcode=0x%02h status=0x%02h",
+            xtn.opcode, xtn.status), UVM_HIGH)
         m_resp_act_fifo.write(xtn);
     endfunction
 
@@ -171,19 +171,15 @@ class aplc_scoreboard extends uvm_scoreboard;
 
     function void compare_resp(spi_xtn act, spi_xtn exp);
         bit match = 1;
-        bit [7:0] act_status, exp_status;
-        // Status is stored in wdata[0][7:0] for both actual and expected
-        if (act.wdata.size() > 0) act_status = act.wdata[0][7:0];
-        if (exp.wdata.size() > 0) exp_status = exp.wdata[0][7:0];
-        if (act_status !== exp_status) match = 0;
+        if (act.status !== exp.status) match = 0;
 
         if (match) begin
             m_resp_match_count++;
-            `uvm_info(get_type_name(), $sformatf("RESP MATCH: status=0x%02h", act_status), UVM_HIGH)
+            `uvm_info(get_type_name(), $sformatf("RESP MATCH: status=0x%02h", act.status), UVM_HIGH)
         end else begin
             m_resp_mismatch_count++;
             `uvm_error(get_type_name(), $sformatf("RESP MISMATCH: act_status=0x%02h exp_status=0x%02h exp_opcode=0x%02h",
-                act_status, exp_status, exp.opcode))
+                act.status, exp.status, exp.opcode))
         end
     endfunction
 

@@ -1,141 +1,204 @@
+// APLC-Lite SPI Monitor
+// Observes the external test IO interface and creates transactions
+// Two analysis ports: req_ap for request transactions, resp_ap for response transactions
 class spi_monitor extends uvm_monitor;
 
     `uvm_component_utils(spi_monitor)
 
-    virtual spi_if m_vif;
-    spi_config     m_cfg;
-
     uvm_analysis_port #(spi_xtn) req_ap;
     uvm_analysis_port #(spi_xtn) resp_ap;
+    virtual spi_if vif;
+    spi_config m_config;
 
-    function new(string name, uvm_component parent);
+    function new(string name = "spi_monitor", uvm_component parent = null);
         super.new(name, parent);
     endfunction
 
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
-        if (!uvm_config_db#(spi_config)::get(this, "", "cfg", m_cfg))
-            `uvm_fatal(get_type_name(), "Cannot get spi_config")
-        m_vif = m_cfg.m_vif;
         req_ap  = new("req_ap", this);
         resp_ap = new("resp_ap", this);
+        if (!uvm_config_db #(spi_config)::get(this, "", "cfg", m_config))
+            `uvm_fatal(get_type_name(), "spi_config not found")
+        vif = m_config.m_vif;
     endfunction
 
     task run_phase(uvm_phase phase);
         forever begin
-            bit req_bits[$];
-            bit resp_bits[$];
-            bit [7:0] opcode;
-            bit opcode_latched;
-            int expected_bits;
-            bit [4:0] burst_len_latched;
-            bit frame_aborted;
+            @(vif.mon_cb);
+            if (vif.mon_cb.pcs_n === 1'b0) begin
+                capture_frame();
+            end
+        end
+    endtask
 
-            // Wait for pcs_n to go low (frame start)
-            @(m_vif.mon_cb);
-            while (m_vif.mon_cb.pcs_n !== 1'b0)
-                @(m_vif.mon_cb);
+    task capture_frame();
+        spi_xtn xtn;
+        logic [79:0] rx_shift;
+        int unsigned rx_count;
+        int unsigned bpc;
+        logic [7:0]  opcode_latched;
+        int unsigned expected_bits;
+        bit frame_valid;
+        bit req_sent;
+        bit resp_captured;
+        int timeout_cnt;
 
-            opcode_latched = 0;
-            expected_bits  = 0;
-            burst_len_latched = 0;
-            frame_aborted   = 0;
+        xtn = spi_xtn::type_id::create("xtn");
+        xtn.lane_mode = vif.mon_cb.lane_mode;
+        bpc = get_bpc(xtn.lane_mode);
 
-            // Phase 1: Capture request bits while pcs_n=0 and pdo_oe=0
-            while (m_vif.mon_cb.pcs_n === 1'b0 && m_vif.mon_cb.pdo_oe !== 1'b1) begin
-                capture_bits(req_bits);
-                if (!opcode_latched && req_bits.size() >= 8) begin
-                    opcode = 8'b0;
-                    for (int i = 0; i < 8; i++)
-                        opcode[i] = req_bits[7 - i];
-                    opcode_latched = 1;
-                    expected_bits = get_header_length(opcode);
+        rx_shift = 80'b0;
+        rx_count = 0;
+        expected_bits = 0;
+        opcode_latched = 8'h00;
+        frame_valid = 0;
+        req_sent = 0;
+        resp_captured = 0;
+
+        // Capture entire transaction (request + turnaround + response) while pcs_n is low
+        while (vif.mon_cb.pcs_n === 1'b0) begin
+            // Request phase: shift in pdi data
+            if (!frame_valid) begin
+                case (bpc)
+                    16: rx_shift = {rx_shift[63:0], vif.mon_cb.pdi};
+                     8: rx_shift = {rx_shift[71:0], vif.mon_cb.pdi[15:8]};
+                     4: rx_shift = {rx_shift[75:0], vif.mon_cb.pdi[15:12]};
+                     1: rx_shift = {rx_shift[78:0], vif.mon_cb.pdi[0]};
+                endcase
+                rx_count += bpc;
+
+                if (rx_count >= 8 && opcode_latched == 8'h00) begin
+                    opcode_latched = rx_shift[79:72];
+                    xtn.opcode = opcode_latched;
+                    expected_bits = get_expected_bits(opcode_latched);
                 end
-                if (opcode_latched && !burst_len_latched && req_bits.size() >= 16) begin
-                    if (opcode inside {8'h22, 8'h23}) begin
-                        burst_len_latched = 5'b0;
-                        for (int i = 0; i < 5; i++)
-                            burst_len_latched[i] = req_bits[15 - i];
-                        if (opcode == 8'h22)
-                            expected_bits = 48 + 32 * burst_len_latched;
-                    end else begin
-                        burst_len_latched = 5'b1;
-                    end
+
+                if (expected_bits > 0 && rx_count >= expected_bits) begin
+                    frame_valid = 1;
+                    parse_frame(xtn, rx_shift, opcode_latched);
                 end
-                if (opcode_latched && req_bits.size() >= expected_bits && expected_bits > 0)
-                    break;
-                @(m_vif.mon_cb);
             end
 
-            // Check for frame abort (pcs_n went high before request complete)
-            if (m_vif.mon_cb.pcs_n === 1'b1 && opcode_latched &&
-                req_bits.size() < expected_bits)
-                frame_aborted = 1;
-
-            // Emit request transaction
-            if (opcode_latched) begin
-                spi_xtn xtn;
-                xtn = spi_xtn::type_id::create("req_xtn");
-                xtn.opcode = opcode;
-                parse_request(xtn, req_bits);
-                xtn.lane_mode  = m_vif.mon_cb.lane_mode;
-                xtn.en         = m_vif.mon_cb.en;
-                xtn.test_mode  = m_vif.mon_cb.test_mode;
-                xtn.frame_abort = frame_aborted;
+            // Send request as soon as frame is decoded
+            if (frame_valid && !req_sent) begin
                 xtn.is_csr   = xtn.opcode inside {8'h10, 8'h11};
                 xtn.is_ahb   = xtn.opcode inside {8'h20, 8'h21, 8'h22, 8'h23};
                 xtn.is_read  = xtn.opcode inside {8'h11, 8'h21, 8'h23};
                 xtn.is_burst = xtn.opcode inside {8'h22, 8'h23};
+                xtn.en        = vif.mon_cb.en;
+                xtn.test_mode = vif.mon_cb.test_mode;
                 req_ap.write(xtn);
+                req_sent = 1;
             end
 
-            // Phase 2: Capture response bits while pdo_oe=1
-            if (m_vif.mon_cb.pdo_oe === 1'b1) begin
-                while (m_vif.mon_cb.pdo_oe === 1'b1) begin
-                    capture_resp_bits(resp_bits);
-                    @(m_vif.mon_cb);
-                end
+            // Response phase: capture pdo data when pdo_oe is asserted
+            if (req_sent && !resp_captured && vif.mon_cb.pdo_oe === 1'b1) begin
+                capture_response_inline(xtn, bpc);
+                resp_captured = 1;
+            end
 
-                // Emit response transaction
-                if (resp_bits.size() >= 8) begin
-                    spi_xtn resp_xtn;
-                    bit [7:0] status;
-                    resp_xtn = spi_xtn::type_id::create("resp_xtn");
-                    status = 8'b0;
-                    for (int i = 0; i < 8; i++)
-                        status[i] = resp_bits[7 - i];
-                    resp_xtn.opcode = 8'hFF;
-                    resp_xtn.wdata = new[1];
-                    resp_xtn.wdata[0] = {24'b0, status};
-                    resp_ap.write(resp_xtn);
+            @(vif.mon_cb);
+        end
+
+        // If frame was valid but response not yet captured (pdo_oe may have been too brief),
+        // try to capture now. Also handle the case where response comes after pcs_n edge.
+        if (frame_valid && req_sent) begin
+            if (!resp_captured) begin
+                // Wait briefly for response
+                timeout_cnt = 0;
+                while (vif.mon_cb.pdo_oe !== 1'b1 && timeout_cnt < 100) begin
+                    @(vif.mon_cb);
+                    timeout_cnt++;
+                end
+                if (vif.mon_cb.pdo_oe === 1'b1) begin
+                    capture_response_inline(xtn, bpc);
+                    resp_captured = 1;
                 end
             end
 
-            // Phase 3: Wait for pcs_n to go high (frame end)
-            while (m_vif.mon_cb.pcs_n !== 1'b1)
-                @(m_vif.mon_cb);
+            `uvm_info(get_type_name(), $sformatf("Captured: opcode=0x%02h status=0x%02h rdata=0x%08h",
+                xtn.opcode, xtn.status, xtn.rdata), UVM_HIGH)
+
+            // Send response on resp_ap
+            resp_ap.write(xtn);
+        end
+
+    endtask
+
+    task capture_response_inline(spi_xtn xtn, int unsigned bpc);
+        logic [559:0] resp_shift;
+        int unsigned bits_captured;
+        int unsigned resp_bits;
+        logic [15:0] pdo_chunk;
+
+        case (xtn.opcode)
+            8'h11:         resp_bits = 40; // RD_CSR
+            8'h21:         resp_bits = 40; // AHB_RD32
+            8'h23:         resp_bits = 8 + 32 * xtn.burst_len; // AHB_RD_BURST
+            default:       resp_bits = 8;
+        endcase
+
+        resp_shift = 560'b0;
+        bits_captured = 0;
+        while (bits_captured < resp_bits && vif.mon_cb.pdo_oe === 1'b1) begin
+            pdo_chunk = vif.mon_cb.pdo;
+            case (bpc)
+                16: resp_shift = {resp_shift[543:0], pdo_chunk};
+                 8: resp_shift = {resp_shift[551:0], pdo_chunk[15:8]};
+                 4: resp_shift = {resp_shift[555:0], pdo_chunk[15:12]};
+                 1: resp_shift = {resp_shift[558:0], pdo_chunk[0]};
+            endcase
+            bits_captured += bpc;
+            @(vif.mon_cb);
+        end
+
+        // Left-justify captured data to MSB for correct fixed-position parsing
+        if (bits_captured > 0 && bits_captured < 560)
+            resp_shift = resp_shift << (560 - bits_captured);
+
+        xtn.status = resp_shift[559:552];
+        if (resp_bits > 8) begin
+            xtn.rdata = resp_shift[551:520];
         end
     endtask
 
-    task capture_bits(ref bit q[$]);
-        case (m_vif.mon_cb.lane_mode)
-            2'b00: q.push_back(m_vif.mon_cb.pdi[0]);
-            2'b01: for (int i = 3; i >= 0; i--) q.push_back(m_vif.mon_cb.pdi[i]);
-            2'b10: for (int i = 7; i >= 0; i--) q.push_back(m_vif.mon_cb.pdi[i]);
-            2'b11: for (int i = 15; i >= 0; i--) q.push_back(m_vif.mon_cb.pdi[i]);
+    function void parse_frame(spi_xtn xtn, logic [79:0] rx_shift, logic [7:0] opcode);
+        case (opcode)
+            8'h10: begin // WR_CSR
+                xtn.reg_addr = rx_shift[71:64];
+                xtn.wdata = new[1];
+                xtn.wdata[0] = rx_shift[63:32];
+            end
+            8'h11: begin // RD_CSR
+                xtn.reg_addr = rx_shift[71:64];
+            end
+            8'h20: begin // AHB_WR32
+                xtn.addr  = rx_shift[71:40];
+                xtn.wdata = new[1];
+                xtn.wdata[0] = rx_shift[39:8];
+            end
+            8'h21: begin // AHB_RD32
+                xtn.addr = rx_shift[71:40];
+            end
+            8'h22, 8'h23: begin // AHB_WR_BURST, AHB_RD_BURST
+                xtn.burst_len = rx_shift[71:67];
+                xtn.addr      = rx_shift[63:32];
+            end
         endcase
-    endtask
+    endfunction
 
-    task capture_resp_bits(ref bit q[$]);
-        case (m_vif.mon_cb.lane_mode)
-            2'b00: q.push_back(m_vif.mon_cb.pdo[0]);
-            2'b01: for (int i = 3; i >= 0; i--) q.push_back(m_vif.mon_cb.pdo[i]);
-            2'b10: for (int i = 7; i >= 0; i--) q.push_back(m_vif.mon_cb.pdo[i]);
-            2'b11: for (int i = 15; i >= 0; i--) q.push_back(m_vif.mon_cb.pdo[i]);
+    function int get_bpc(logic [1:0] lane_mode);
+        case (lane_mode)
+            2'b00: return 1;
+            2'b01: return 4;
+            2'b10: return 8;
+            2'b11: return 16;
         endcase
-    endtask
+        return 16;
+    endfunction
 
-    function int get_header_length(bit [7:0] opcode);
+    function int get_expected_bits(logic [7:0] opcode);
         case (opcode)
             8'h10: return 48;
             8'h11: return 16;
@@ -143,55 +206,7 @@ class spi_monitor extends uvm_monitor;
             8'h21: return 40;
             8'h22: return 48;
             8'h23: return 48;
-            default: return 8;
-        endcase
-    endfunction
-
-    function void parse_request(spi_xtn xtn, ref bit q[$]);
-        int idx;
-        idx = 8;
-        case (xtn.opcode)
-            8'h10: begin
-                xtn.reg_addr = 8'b0;
-                for (int i = 0; i < 8; i++) xtn.reg_addr[i] = q[idx + 7 - i];
-                idx += 8;
-                xtn.wdata = new[1];
-                xtn.wdata[0] = 32'b0;
-                for (int i = 0; i < 32; i++) xtn.wdata[0][i] = q[idx + 31 - i];
-            end
-            8'h11: begin
-                xtn.reg_addr = 8'b0;
-                for (int i = 0; i < 8; i++) xtn.reg_addr[i] = q[idx + 7 - i];
-            end
-            8'h20: begin
-                xtn.addr = 32'b0;
-                for (int i = 0; i < 32; i++) xtn.addr[i] = q[idx + 31 - i];
-                idx += 32;
-                xtn.wdata = new[1];
-                xtn.wdata[0] = 32'b0;
-                for (int i = 0; i < 32; i++) xtn.wdata[0][i] = q[idx + 31 - i];
-            end
-            8'h21: begin
-                xtn.addr = 32'b0;
-                for (int i = 0; i < 32; i++) xtn.addr[i] = q[idx + 31 - i];
-            end
-            8'h22, 8'h23: begin
-                xtn.burst_len = 5'b0;
-                for (int i = 0; i < 5; i++) xtn.burst_len[i] = q[idx + 4 - i];
-                idx += 8;
-                xtn.addr = 32'b0;
-                for (int i = 0; i < 32; i++) xtn.addr[i] = q[idx + 31 - i];
-                idx += 32;
-                if (xtn.opcode == 8'h22 && xtn.burst_len > 0) begin
-                    xtn.wdata = new[xtn.burst_len];
-                    foreach (xtn.wdata[j]) begin
-                        xtn.wdata[j] = 32'b0;
-                        for (int i = 0; i < 32; i++)
-                            xtn.wdata[j][i] = q[idx + 31 - i];
-                        idx += 32;
-                    end
-                end
-            end
+            default: return 80;
         endcase
     endfunction
 

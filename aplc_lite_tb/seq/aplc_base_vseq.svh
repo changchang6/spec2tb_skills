@@ -3,6 +3,10 @@ class aplc_base_vseq extends uvm_sequence;
     `uvm_object_utils(aplc_base_vseq)
     `uvm_declare_p_sequencer(spi_sequencer)
 
+    // Last response data from driver (filled after each send)
+    bit [7:0]  last_rsp_status;
+    bit [31:0] last_rsp_rdata;
+
     function new(string name = "aplc_base_vseq");
         super.new(name);
     endfunction
@@ -34,6 +38,8 @@ class aplc_base_vseq extends uvm_sequence;
         req.test_mode = 1'b1;
         req.burst_len = 0;
         `uvm_send(req)
+        last_rsp_status = req.status;
+        last_rsp_rdata  = req.rdata;
     endtask
 
     // Helper: create and send a RD_CSR request
@@ -48,6 +54,8 @@ class aplc_base_vseq extends uvm_sequence;
         req.burst_len = 0;
         req.wdata     = new[0];
         `uvm_send(req)
+        last_rsp_status = req.status;
+        last_rsp_rdata  = req.rdata;
     endtask
 
     // Helper: create and send AHB_WR32
@@ -63,6 +71,8 @@ class aplc_base_vseq extends uvm_sequence;
         req.test_mode = 1'b1;
         req.burst_len = 0;
         `uvm_send(req)
+        last_rsp_status = req.status;
+        last_rsp_rdata  = req.rdata;
     endtask
 
     // Helper: create and send AHB_RD32
@@ -77,6 +87,8 @@ class aplc_base_vseq extends uvm_sequence;
         req.burst_len = 0;
         req.wdata     = new[0];
         `uvm_send(req)
+        last_rsp_status = req.status;
+        last_rsp_rdata  = req.rdata;
     endtask
 
     // Helper: send a request with specific en/test_mode for error testing
@@ -94,6 +106,8 @@ class aplc_base_vseq extends uvm_sequence;
         req.wdata     = new[1];
         req.wdata[0]  = 32'hDEAD_BEEF;
         `uvm_send(req)
+        last_rsp_status = req.status;
+        last_rsp_rdata  = req.rdata;
     endtask
 
 endclass

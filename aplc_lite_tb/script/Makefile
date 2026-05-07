@@ -4,7 +4,7 @@ VERDI     = verdi
 
 SCRIPT_DIR    := $(shell pwd)
 APLC_TB_HOME  := $(SCRIPT_DIR)/..
-APLC_RTL_HOME := $(HOME)/ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl
+APLC_RTL_HOME := $(HOME)/ai_evaluation/claude_code/spec2tb/cc_APLC_Lite/rtl
 VIP_AHB_HOME  := $(SCRIPT_DIR)/../../vip/yuu_ahb
 
 export APLC_TB_HOME
@@ -82,7 +82,7 @@ comp:
 	cd $(SIM_DIR) && $(VCS) $(VCS_COMP_OPTS) -f $(APLC_TB_HOME)/filelist/aplc_verif.f
 
 sim: comp
-	cd $(SIM_DIR) && ./simv $(VCS_SIM_OPTS)
+	cd $(SIM_DIR) && ./simv $(VCS_SIM_OPTS) -gui=verdi
 
 wave:
 	cd $(SIM_DIR) && $(VERDI) -f $(APLC_TB_HOME)/filelist/aplc_verif.f -ssf $(WAVE_FSDB) -top tb -nologo &

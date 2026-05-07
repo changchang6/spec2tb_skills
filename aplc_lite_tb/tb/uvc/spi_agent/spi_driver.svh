@@ -1,128 +1,214 @@
+// APLC-Lite SPI Driver
+// Drives the external test IO interface (pcs_n, pdi, lane_mode, en, test_mode)
+// according to the half-duplex protocol defined in LRS
+// Key: pcs_n must stay LOW for the entire transaction (request + turnaround + response)
 class spi_driver extends uvm_driver #(spi_xtn);
 
     `uvm_component_utils(spi_driver)
 
-    virtual spi_if m_vif;
-    spi_config     m_cfg;
+    virtual spi_if vif;
+    spi_config m_config;
 
-    function new(string name, uvm_component parent);
+    // Opcode constants
+    localparam logic [7:0] OP_WR_CSR       = 8'h10;
+    localparam logic [7:0] OP_RD_CSR       = 8'h11;
+    localparam logic [7:0] OP_AHB_WR32     = 8'h20;
+    localparam logic [7:0] OP_AHB_RD32     = 8'h21;
+    localparam logic [7:0] OP_AHB_WR_BURST = 8'h22;
+    localparam logic [7:0] OP_AHB_RD_BURST = 8'h23;
+
+    function new(string name = "spi_driver", uvm_component parent = null);
         super.new(name, parent);
     endfunction
 
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
-        if (!uvm_config_db#(spi_config)::get(this, "", "cfg", m_cfg))
-            `uvm_fatal(get_type_name(), "Cannot get spi_config")
-        m_vif = m_cfg.m_vif;
+        if (!uvm_config_db #(spi_config)::get(this, "", "cfg", m_config))
+            `uvm_fatal(get_type_name(), "spi_config not found")
+        vif = m_config.m_vif;
     endfunction
 
     task run_phase(uvm_phase phase);
+        init_signals();
         forever begin
-            spi_xtn req;
             seq_item_port.try_next_item(req);
-            if (req == null) begin
-                @(m_vif.drv_cb);
-                continue;
+            if (req != null) begin
+                drive_transaction(req);
+                seq_item_port.item_done();
+            end else begin
+                @(vif.drv_cb);
             end
-            drive_frame(req);
-            seq_item_port.item_done();
         end
     endtask
 
-    task drive_frame(spi_xtn req);
-        bit frame_q[$];
-        int bpc;
-        int idx;
-
-        // Build frame bit queue (MSB-first)
-        pack_frame(req, frame_q);
-
-        // Drive control signals
-        m_vif.drv_cb.en        <= req.en;
-        m_vif.drv_cb.test_mode <= req.test_mode;
-        m_vif.drv_cb.lane_mode <= req.lane_mode;
-        m_vif.drv_cb.pcs_n    <= 1'b0;
-
-        bpc = req.get_bpc();
-
-        // Wait one cycle after pcs_n assertion
-        @(m_vif.drv_cb);
-
-        // Drive frame data
-        idx = 0;
-        while (idx < frame_q.size()) begin
-            case (bpc)
-                1: begin
-                    m_vif.drv_cb.pdi <= {15'b0, frame_q[idx]};
-                    idx++;
-                end
-                4: begin
-                    m_vif.drv_cb.pdi <= {12'b0, frame_q[idx+3], frame_q[idx+2],
-                                         frame_q[idx+1], frame_q[idx]};
-                    idx += 4;
-                end
-                8: begin
-                    m_vif.drv_cb.pdi <= {8'b0, frame_q[idx+7], frame_q[idx+6],
-                                         frame_q[idx+5], frame_q[idx+4],
-                                         frame_q[idx+3], frame_q[idx+2],
-                                         frame_q[idx+1], frame_q[idx]};
-                    idx += 8;
-                end
-                16: begin
-                    m_vif.drv_cb.pdi <= {frame_q[idx+15], frame_q[idx+14],
-                                         frame_q[idx+13], frame_q[idx+12],
-                                         frame_q[idx+11], frame_q[idx+10],
-                                         frame_q[idx+9],  frame_q[idx+8],
-                                         frame_q[idx+7],  frame_q[idx+6],
-                                         frame_q[idx+5],  frame_q[idx+4],
-                                         frame_q[idx+3],  frame_q[idx+2],
-                                         frame_q[idx+1],  frame_q[idx]};
-                    idx += 16;
-                end
-            endcase
-            @(m_vif.drv_cb);
-        end
-
-        // Release pcs_n
-        m_vif.drv_cb.pcs_n <= 1'b1;
-        m_vif.drv_cb.pdi   <= '0;
+    task init_signals();
+        vif.drv_cb.pcs_n     <= 1'b1;
+        vif.drv_cb.pdi       <= 16'b0;
+        vif.drv_cb.en        <= 1'b1;
+        vif.drv_cb.test_mode <= 1'b1;
+        vif.drv_cb.lane_mode <= 2'b00; // match DUT reset default (1-bit)
     endtask
 
-    task pack_frame(spi_xtn req, ref bit q[$]);
-        // Opcode (8 bits, MSB-first)
-        for (int i = 7; i >= 0; i--) q.push_back(req.opcode[i]);
+    task drive_transaction(spi_xtn xtn);
+        logic [79:0] frame;
+        int unsigned frame_bits;
+        int unsigned bpc;
 
-        case (req.opcode)
-            8'h10: begin // WR_CSR
-                for (int i = 7; i >= 0; i--) q.push_back(req.reg_addr[i]);
-                for (int i = 31; i >= 0; i--) q.push_back(req.wdata[0][i]);
+        vif.drv_cb.lane_mode <= xtn.lane_mode;
+        bpc = get_bpc(xtn.lane_mode);
+
+        build_frame(xtn, frame, frame_bits);
+        // Keep pcs_n low for entire transaction (request + response)
+        drive_request(frame, frame_bits, bpc);
+        capture_response(xtn, bpc);
+        // Release pcs_n only after the full transaction is complete
+        vif.drv_cb.pcs_n <= 1'b1;
+        vif.drv_cb.pdi   <= 16'b0;
+        @(vif.drv_cb);
+    endtask
+
+    function int get_bpc(logic [1:0] lane_mode);
+        case (lane_mode)
+            2'b00: return 1;
+            2'b01: return 4;
+            2'b10: return 8;
+            2'b11: return 16;
+        endcase
+        return 16;
+    endfunction
+
+    task build_frame(spi_xtn xtn, output logic [79:0] frame, output int unsigned frame_bits);
+        frame = 80'b0;
+        case (xtn.opcode)
+            OP_WR_CSR: begin
+                frame[79:72] = xtn.opcode;
+                frame[71:64] = xtn.reg_addr;
+                frame[63:32] = (xtn.wdata.size() > 0) ? xtn.wdata[0] : 32'b0;
+                frame_bits = 48;
             end
-            8'h11: begin // RD_CSR
-                for (int i = 7; i >= 0; i--) q.push_back(req.reg_addr[i]);
+            OP_RD_CSR: begin
+                frame[79:72] = xtn.opcode;
+                frame[71:64] = xtn.reg_addr;
+                frame_bits = 16;
             end
-            8'h20: begin // AHB_WR32
-                for (int i = 31; i >= 0; i--) q.push_back(req.addr[i]);
-                for (int i = 31; i >= 0; i--) q.push_back(req.wdata[0][i]);
+            OP_AHB_WR32: begin
+                frame[79:72] = xtn.opcode;
+                frame[71:40] = xtn.addr;
+                frame[39:8]  = (xtn.wdata.size() > 0) ? xtn.wdata[0] : 32'b0;
+                frame_bits = 72;
             end
-            8'h21: begin // AHB_RD32
-                for (int i = 31; i >= 0; i--) q.push_back(req.addr[i]);
+            OP_AHB_RD32: begin
+                frame[79:72] = xtn.opcode;
+                frame[71:40] = xtn.addr;
+                frame_bits = 40;
             end
-            8'h22: begin // AHB_WR_BURST
-                for (int i = 4; i >= 0; i--) q.push_back(req.burst_len[i]);
-                repeat (3) q.push_back(1'b0); // rsvd
-                for (int i = 31; i >= 0; i--) q.push_back(req.addr[i]);
-                foreach (req.wdata[j])
-                    for (int i = 31; i >= 0; i--) q.push_back(req.wdata[j][i]);
+            OP_AHB_WR_BURST: begin
+                frame[79:72] = xtn.opcode;
+                frame[71:67] = xtn.burst_len;
+                frame[66:64] = 3'b000;
+                frame[63:32] = xtn.addr;
+                frame_bits = 48;
             end
-            8'h23: begin // AHB_RD_BURST
-                for (int i = 4; i >= 0; i--) q.push_back(req.burst_len[i]);
-                repeat (3) q.push_back(1'b0); // rsvd
-                for (int i = 31; i >= 0; i--) q.push_back(req.addr[i]);
+            OP_AHB_RD_BURST: begin
+                frame[79:72] = xtn.opcode;
+                frame[71:67] = xtn.burst_len;
+                frame[66:64] = 3'b000;
+                frame[63:32] = xtn.addr;
+                frame_bits = 48;
             end
             default: begin
-                // Unknown opcode - just send the opcode byte
+                frame[79:72] = xtn.opcode;
+                frame_bits = 8;
             end
         endcase
+    endtask
+
+    task drive_request(logic [79:0] frame, int unsigned frame_bits, int unsigned bpc);
+        int unsigned bits_sent;
+        logic [15:0] pdi_chunk;
+
+        bits_sent = 0;
+
+        // Send frame data MSB-first, starting with pcs_n assertion
+        while (bits_sent < frame_bits) begin
+            pdi_chunk = 16'b0;
+            case (bpc)
+                16: pdi_chunk = frame[79:64];
+                 8: pdi_chunk = {frame[79:72], 8'b0};
+                 4: pdi_chunk = {frame[79:76], 12'b0};
+                 1: pdi_chunk = {15'b0, frame[79]};
+            endcase
+            vif.drv_cb.pcs_n <= 1'b0;
+            vif.drv_cb.pdi   <= pdi_chunk;
+
+            frame = frame << bpc;
+            bits_sent += bpc;
+
+            @(vif.drv_cb);
+        end
+
+        // Clear pdi after request, but keep pcs_n low (response is coming)
+        vif.drv_cb.pdi <= 16'b0;
+    endtask
+
+    task capture_response(spi_xtn xtn, int unsigned bpc);
+        int timeout_cnt;
+        logic [7:0]  resp_status;
+        logic [31:0] resp_rdata;
+        logic [15:0] pdo_chunk;
+        int unsigned bits_captured;
+        int unsigned resp_bits;
+        logic [559:0] resp_shift;
+
+        // Determine expected response length
+        case (xtn.opcode)
+            OP_RD_CSR:       resp_bits = 40;
+            OP_AHB_RD32:     resp_bits = 40;
+            OP_AHB_RD_BURST: resp_bits = 8 + 32 * xtn.burst_len;
+            default:         resp_bits = 8;
+        endcase
+
+        // Wait for DUT to drive response (pdo_oe goes high)
+        // This includes the 1-cycle turnaround
+        timeout_cnt = 0;
+        while (vif.drv_cb.pdo_oe !== 1'b1 && timeout_cnt < 10000) begin
+            @(vif.drv_cb);
+            timeout_cnt++;
+        end
+        if (timeout_cnt >= 10000) begin
+            `uvm_error(get_type_name(), "Timeout waiting for DUT response (pdo_oe)")
+            return;
+        end
+
+        // Capture response bits from pdo
+        resp_shift = 560'b0;
+        bits_captured = 0;
+        while (bits_captured < resp_bits && vif.drv_cb.pdo_oe === 1'b1) begin
+            pdo_chunk = vif.drv_cb.pdo;
+            case (bpc)
+                16: resp_shift = {resp_shift[543:0], pdo_chunk};
+                 8: resp_shift = {resp_shift[551:0], pdo_chunk[15:8]};
+                 4: resp_shift = {resp_shift[555:0], pdo_chunk[15:12]};
+                 1: resp_shift = {resp_shift[558:0], pdo_chunk[0]};
+            endcase
+            bits_captured += bpc;
+            @(vif.drv_cb);
+        end
+
+        // Left-justify captured data to MSB for correct fixed-position parsing
+        if (bits_captured > 0 && bits_captured < 560)
+            resp_shift = resp_shift << (560 - bits_captured);
+
+        // Parse response - status is always first 8 bits
+        resp_status = resp_shift[559:552];
+        xtn.status = resp_status;
+
+        if (resp_bits > 8) begin
+            resp_rdata = resp_shift[551:520];
+            xtn.rdata = resp_rdata;
+        end
+
+        `uvm_info(get_type_name(), $sformatf("Captured response: opcode=0x%02h status=0x%02h rdata=0x%08h", xtn.opcode, xtn.status, xtn.rdata), UVM_HIGH)
     endtask
 
 endclass

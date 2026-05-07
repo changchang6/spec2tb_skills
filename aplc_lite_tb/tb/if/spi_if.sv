@@ -15,6 +15,15 @@ interface spi_if(input logic clk, input logic rst_n);
     logic        txfifo_empty;
     logic        txfifo_full;
 
+    // Initialize driver-controlled signals to idle state
+    initial begin
+        pcs_n     = 1'b1;
+        pdi       = '0;
+        en        = 1'b0;
+        test_mode = 1'b0;
+        lane_mode = 2'b00;
+    end
+
     clocking drv_cb @(posedge clk);
         output pcs_n, pdi, lane_mode, en, test_mode;
         input  pdo, pdo_oe;
@@ -27,5 +36,13 @@ interface spi_if(input logic clk, input logic rst_n);
 
     modport drv_mp(clocking drv_cb);
     modport mon_mp(clocking mon_cb);
+
+    // CHK_SPI: Every frame (pcs_n low) must have DUT response (pdo_oe high)
+    property p_frame_has_response;
+        @(posedge clk) disable iff (!rst_n)
+        $fell(pcs_n) |-> (!pcs_n) throughout (##[1:$] pdo_oe === 1'b1);
+    endproperty
+    assert property(p_frame_has_response) else
+        $error("[CHK_SPI] Frame without response: pdo_oe not asserted during pcs_n low");
 
 endinterface
