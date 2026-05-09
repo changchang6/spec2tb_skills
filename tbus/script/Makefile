@@ -3,7 +3,7 @@
 #   make comp        - Compile the testbench
 #   make sim         - Compile and run default test
 #   make sim TEST=xx - Run specific test
-#   make wave        - Open Verdi to view waveform of last simulation
+#   make wave        - Open Verdi to view waveform
 #   make clean       - Clean build artifacts
 
 # -------------------- Configuration --------------------
@@ -12,12 +12,12 @@ VERDI     = verdi
 
 SCRIPT_DIR    := $(shell pwd)
 APLC_TB_HOME  := $(SCRIPT_DIR)/..
-APLC_RTL_HOME := $(APLC_TB_HOME)/../../../../../ai_evaluation/claude_code/rtm_gen/APLC-Lite/rtl
+APLC_RTL_HOME := $(HOME)/ai_evaluation/claude_code/spec2tb/cc_APLC_Lite/rtl
 
 export APLC_TB_HOME
 export APLC_RTL_HOME
 
-TEST     ?= aplc_wr_csr_test
+TEST     ?= aplc_smoke_test
 SEED     ?= $(shell date +%s)
 SIM_DIR  ?= sim_work
 GUI      ?= 0
@@ -35,12 +35,12 @@ VCS_COMP_OPTS = \
     -lca \
     +incdir+$(APLC_TB_HOME)/tb/if \
     +incdir+$(APLC_TB_HOME)/tb/uvc/spi_agent \
-    +incdir+$(APLC_TB_HOME)/tb/uvc/ahb_agent \
     +incdir+$(APLC_TB_HOME)/tb/uvc/csr_agent \
     +incdir+$(APLC_TB_HOME)/tb/env \
     -timescale=1ns/1ps \
     -ntb_opts uvm-1.2 \
     +define+UVM_NO_DPI \
+    +define+YUU_UVM \
     -LDFLAGS -Wl,--no-as-needed \
     -l compile.log
 
@@ -64,7 +64,7 @@ endif
 
 # Waveform dump (default on)
 ifeq ($(DUMP),1)
-VCS_COMP_OPTS += +define+DUMP_FSDB
+VCS_COMP_OPTS += +define+DUMP_VPD
 endif
 
 # GUI (default off)
@@ -89,13 +89,13 @@ cov_report:
 	cd $(SIM_DIR) && urg -dir $(COV_DIR)/$(TEST).vdb -report cov_report
 
 cov_view:
-	cd $(SIM_DIR) && $(VERDI) -cov -covdir $(COV_DIR)/$(TEST).vdb -top tb &
+	cd $(SIM_DIR) && $(VERDI) -cov -covdir $(COV_DIR)/$(TEST).vdb -top aplc_tb_top &
 
 cov_merge:
 	cd $(SIM_DIR) && urg -dir $(COV_DIR)/*.vdb -report cov_merge_report
 
 cov_merge_view:
-	cd $(SIM_DIR) && $(VERDI) -cov -covdir $(COV_DIR)/*.vdb -top tb &
+	cd $(SIM_DIR) && $(VERDI) -cov -covdir $(COV_DIR)/*.vdb -top aplc_tb_top &
 
 cov_multi: comp
 	@for i in $$(seq 1 $(COV_SEEDS)); do \

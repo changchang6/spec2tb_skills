@@ -6,8 +6,7 @@
 1. [Checker分类映射](#checker分类映射)
 2. [参考模型模式](#参考模型模式)
 3. [计分板模式](#计分板模式)
-4. [Monitor协议检查模式](#monitor协议检查模式)
-5. [SVA断言模式](#sva断言模式)
+4. [SVA断言模式](#sva断言模式)
 
 ---
 
@@ -30,26 +29,18 @@
 | 状态报告 (status report) | 参考模型预测STATUS/LAST_ERR寄存器值 |
 | 帧格式 (frame format) | 参考模型预测响应帧的格式和长度 |
 
-### Monitor协议检查 (Monitor Protocol Check)
-
-检查接口时序/协议合规性的checker，在各agent的monitor中实现：
-
-| Checker类型 | 实现位置 | 检查内容 |
-|------------|---------|---------|
-| 帧协议检查 (frame protocol) | SPI monitor | pcs_n时序、pdo_oe时序、turnaround周期、burst连续性 |
-| CSR时序检查 (CSR timing) | CSR monitor | wr_en/rd_en单周期脉冲、读延迟1周期、地址范围 |
-| AHB协议检查 (AHB protocol) | AHB monitor | hsize固定WORD、haddr对齐、htrans序列、hburst稳定、地址递增+4 |
-| Lane模式检查 (lane mode) | SPI monitor | 数据位宽与lane_mode配置一致 |
-
 ### SVA断言 (SVA Assertions)
 
-纯信号级检查，在tb.sv或interface中用SystemVerilog断言实现：
+纯信号级检查，以及检查接口时序/协议合规性的checker，在interface中用SystemVerilog断言实现：
 
-| Checker类型 | 检查内容 |
-|------------|---------|
-| 复位状态检查 (reset state) | 复位释放后FSM回到IDLE、输出信号初始值正确 |
-| 空闲行为检查 (low power/idle) | 空闲时RX/TX逻辑不翻转 |
-| AHB固定属性 | hsize始终WORD、haddr始终4字节对齐 |
+| Checker类型 | 检查内容 | 断言位置 |
+|------------|---------|---------|
+| 复位状态检查 (reset state) | 复位释放后FSM回到IDLE、输出信号初始值正确 | 对应interface |
+| 空闲行为检查 (low power/idle) | 空闲时RX/TX逻辑不翻转 | spi_if.sv |
+| 帧协议检查 (frame protocol) | pcs_n时序、pdo_oe时序、turnaround周期、burst连续性 | spi_if.sv |
+| CSR时序检查 (CSR timing) | wr_en/rd_en单周期脉冲、读延迟1周期、地址范围 | csr_if.sv |
+| AHB协议检查 (AHB protocol) | hsize固定WORD、haddr对齐、htrans序列、hburst稳定、地址递增+4 | VIP自带（复用时跳过） |
+| Lane模式检查 (lane mode) | 数据位宽与lane_mode配置一致 | spi_if.sv |
 
 ### Coverage采集 (Coverage Collection)
 
@@ -64,7 +55,7 @@
 
 ## 参考模型模式
 
-参考模型是纯功能预测器，接收输入侧事务，预测输出侧行为。
+参考模型是纯功能预测器，接收输入侧事务，预测输出侧行为。它必须维护寄存器模型和内存模型，才能预测读操作的返回数据。
 
 ### 类结构
 
@@ -80,8 +71,21 @@ class dut_ref_model extends uvm_component;
     uvm_analysis_port #(output_xtn)  m_output_exp_ap;  // 预期的输出侧事务
     uvm_analysis_port #(response_xtn) m_resp_exp_ap;    // 预期的响应事务
 
-    // 内部状态
-    // 根据DUT功能维护必要的配置状态
+    // ---- 寄存器模型: CSR影子副本 ----
+    // 每个CSR寄存器对应一个影子变量，初始值从Regmap获取
+    logic [31:0] m_ctrl_shadow;    // CTRL寄存器，默认值从Regmap读取
+    logic [31:0] m_status_shadow;  // STATUS寄存器
+    logic [31:0] m_last_err_shadow;// LAST_ERR寄存器
+    // ... 其他寄存器按Regmap添加
+
+    // ---- 内存模型: AHB shadow memory ----
+    // 关联数组用于预测AHB读返回数据
+    logic [31:0] m_ahb_mem[logic [31:0]];
+
+    // ---- 配置状态 ----
+    bit m_en;
+    bit m_test_mode;
+    logic [1:0] m_lane_mode;
 
     function new(string name, uvm_component parent);
         super.new(name, parent);
@@ -92,13 +96,22 @@ class dut_ref_model extends uvm_component;
         m_req_imp       = new("m_req_imp", this);
         m_output_exp_ap = new("m_output_exp_ap", this);
         m_resp_exp_ap   = new("m_resp_exp_ap", this);
+        // 初始化寄存器影子副本（默认值从Regmap获取）
+        init_reg_shadow();
+    endfunction
+
+    function void init_reg_shadow();
+        // 从Regmap文档获取每个寄存器的默认值
+        m_ctrl_shadow     = 32'h0000_000F; // 示例：CTRL默认值
+        m_status_shadow   = 32'h0000_0000;
+        m_last_err_shadow = 32'h0000_0000;
     endfunction
 
     function void write(input_xtn req);
-        // 1. 解析请求
+        // 1. 更新配置状态（en/test_mode/lane_mode来自输入信号或寄存器）
         // 2. 按优先级检查错误
-        // 3. 有错误: 发送错误响应，不发送下游预期事务
-        // 4. 无错误: 预测下游事务和响应，分别发送
+        // 3. 有错误: 更新STATUS/LAST_ERR影子寄存器，发送错误响应，不发送下游预期事务
+        // 4. 无错误: 预测下游事务和响应，更新寄存器影子副本和内存模型
     endfunction
 
 endclass
@@ -129,32 +142,40 @@ endfunction
 
 ### 行为预测实现
 
-无错误时，根据opcode预测下游事务：
+无错误时，根据opcode预测下游事务。关键是：写操作更新影子状态，读操作从影子状态获取预期数据。
 
 ```systemverilog
 function void predict_behavior(input_xtn req);
     case (req.opcode)
         WR_CSR: begin
-            // 创建预期的CSR写事务
+            // 1. 更新寄存器影子副本
+            update_csr_shadow(req.reg_addr, req.wdata[0]);
+            // 2. 创建预期的CSR写事务
             output_xtn exp = output_xtn::type_id::create("exp");
             exp.write = 1;
             exp.addr  = req.reg_addr;
             exp.data  = req.wdata[0];
             m_output_exp_ap.write(exp);
-            // 发送成功响应
+            // 3. 发送成功响应
             send_response(STS_OK);
         end
         RD_CSR: begin
-            // 创建预期的CSR读事务
+            // 从影子寄存器读取预期值
+            logic [31:0] expected_rdata;
+            expected_rdata = get_csr_shadow(req.reg_addr);
+            // 创建预期的CSR读事务（包含预期rdata）
             output_xtn exp = output_xtn::type_id::create("exp");
             exp.write = 0;
             exp.addr  = req.reg_addr;
-            // 读返回数据无法预测（无内存模型），只预测事务类型
+            exp.data  = expected_rdata;  // 有寄存器模型，可以预测读数据
             m_output_exp_ap.write(exp);
-            send_response(STS_OK, .has_rdata(1));
+            // 发送成功响应（包含预期rdata）
+            send_response(STS_OK, .rdata(expected_rdata));
         end
         AHB_WR32: begin
-            // 创建预期的AHB写事务
+            // 1. 更新shadow memory
+            m_ahb_mem[req.addr] = req.wdata[0];
+            // 2. 创建预期的AHB写事务
             output_xtn exp = output_xtn::type_id::create("exp");
             exp.write = 1;
             exp.addr  = req.addr;
@@ -163,7 +184,58 @@ function void predict_behavior(input_xtn req);
             m_output_exp_ap.write(exp);
             send_response(STS_OK);
         end
+        AHB_RD32: begin
+            // 从shadow memory读取预期值
+            logic [31:0] expected_rdata;
+            if (m_ahb_mem.exists(req.addr))
+                expected_rdata = m_ahb_mem[req.addr];
+            else
+                expected_rdata = 32'h0;  // 未写过的地址返回0
+            // 创建预期的AHB读事务（包含预期rdata）
+            output_xtn exp = output_xtn::type_id::create("exp");
+            exp.write = 0;
+            exp.addr  = req.addr;
+            exp.burst = SINGLE;
+            exp.data  = {expected_rdata};  // 有内存模型，可以预测读数据
+            m_output_exp_ap.write(exp);
+            send_response(STS_OK, .rdata(expected_rdata));
+        end
+        AHB_WR_BURST: begin
+            // 1. 逐beat更新shadow memory
+            for (int i = 0; i < req.wdata.size(); i++) begin
+                m_ahb_mem[req.addr + i*4] = req.wdata[i];
+            end
+            // 2. 逐beat生成expected AHB transaction
+            for (int i = 0; i < req.wdata.size(); i++) begin
+                output_xtn exp = output_xtn::type_id::create("exp");
+                exp.write = 1;
+                exp.addr  = req.addr + i*4;
+                exp.burst = (i == 0) ? INCR : INCR;  // 首拍NONSEQ，后续SEQ
+                exp.data  = {req.wdata[i]};
+                m_output_exp_ap.write(exp);
+            end
+            send_response(STS_OK);
+        end
         // ... 其他opcode类似
+    endcase
+endfunction
+
+// 寄存器影子副本更新
+function void update_csr_shadow(logic [5:0] addr, logic [31:0] wdata);
+    case (addr)
+        6'h00: m_ctrl_shadow     = wdata;  // CTRL
+        // STATUS/LAST_ERR只读，忽略写操作（从Regmap确认哪些寄存器只读）
+        default: ; // 其他寄存器按Regmap添加
+    endcase
+endfunction
+
+// 寄存器影子副本读取
+function logic [31:0] get_csr_shadow(logic [5:0] addr);
+    case (addr)
+        6'h00: return m_ctrl_shadow;
+        6'h01: return m_status_shadow;
+        6'h02: return m_last_err_shadow;
+        default: return 32'h0;
     endcase
 endfunction
 ```
@@ -172,7 +244,7 @@ endfunction
 
 ## 计分板模式
 
-计分板比较参考模型的预期事务与DUT输出侧monitor采样的实际事务。
+计分板比较参考模型的预期事务与DUT输出侧monitor采样的实际事务。由于ref_model维护了寄存器模型和内存模型，读操作的数据也可以完整比较。
 
 ### 类结构
 
@@ -229,24 +301,47 @@ class dut_scoreboard extends uvm_scoreboard;
 
     function void compare(output_xtn act, output_xtn exp);
         bit match = 1;
+        string detail = "";
         // 比较关键字段
-        if (act.addr !== exp.addr) match = 0;
-        if (act.write !== exp.write) match = 0;
-        if (act.burst !== exp.burst) match = 0;
-        // 写操作比较数据
-        if (exp.write && act.data.size() === exp.data.size()) begin
-            foreach (exp.data[i])
-                if (act.data[i] !== exp.data[i]) match = 0;
+        if (act.addr !== exp.addr) begin
+            match = 0; detail = {detail, $sformatf(" addr:act=0x%02h exp=0x%02h", act.addr, exp.addr)};
         end
-        // 读操作不比较数据（参考模型无内存模型）
+        if (act.write !== exp.write) begin
+            match = 0; detail = {detail, $sformatf(" dir:act=%0b exp=%0b", act.write, exp.write)};
+        end
+        if (act.burst !== exp.burst) begin
+            match = 0; detail = {detail, $sformatf(" burst:act=%0d exp=%0d", act.burst, exp.burst)};
+        end
+        // 写操作比较数据
+        if (exp.write) begin
+            if (act.data.size() !== exp.data.size()) begin
+                match = 0; detail = {detail, $sformatf(" data_size:act=%0d exp=%0d", act.data.size(), exp.data.size())};
+            end else begin
+                foreach (exp.data[i])
+                    if (act.data[i] !== exp.data[i]) begin
+                        match = 0; detail = {detail, $sformatf(" wdata[%0d]:act=0x%08h exp=0x%08h", i, act.data[i], exp.data[i])};
+                    end
+            end
+        end
+        // 读操作也比较数据（ref_model有寄存器模型/内存模型可预测读返回值）
+        if (!exp.write) begin
+            if (act.data.size() !== exp.data.size()) begin
+                match = 0; detail = {detail, $sformatf(" rdata_size:act=%0d exp=%0d", act.data.size(), exp.data.size())};
+            end else begin
+                foreach (exp.data[i])
+                    if (act.data[i] !== exp.data[i]) begin
+                        match = 0; detail = {detail, $sformatf(" rdata[%0d]:act=0x%08h exp=0x%08h", i, act.data[i], exp.data[i])};
+                    end
+            end
+        end
 
         if (match) begin
             m_match_count++;
             `uvm_info(get_type_name(), "MATCH", UVM_HIGH)
         end else begin
             m_mismatch_count++;
-            `uvm_error(get_type_name(), $sformatf("MISMATCH: act=%s exp=%s",
-                act.convert2string(), exp.convert2string()))
+            `uvm_error(get_type_name(), $sformatf("MISMATCH:%s  act=%s  exp=%s",
+                detail, act.convert2string(), exp.convert2string()))
         end
     endfunction
 
@@ -264,7 +359,7 @@ endclass
 
 ### 多通道计分板
 
-当DUT有多个输出接口时，为每个接口建立独立的比较通道：
+当DUT有多个输出接口时，为每个接口建立独立的比较通道。Response通道需比较status和rdata。
 
 ```systemverilog
 class dut_scoreboard extends uvm_scoreboard;
@@ -284,116 +379,231 @@ class dut_scoreboard extends uvm_scoreboard;
     uvm_tlm_analysis_fifo #(csr_xtn) m_csr_act_fifo;
     uvm_tlm_analysis_fifo #(csr_xtn) m_csr_exp_fifo;
 
+    // Response通道
+    `uvm_analysis_imp_decl(_resp_act)
+    `uvm_analysis_imp_decl(_resp_exp)
+    uvm_analysis_imp_resp_act #(resp_xtn, dut_scoreboard) m_resp_act_imp;
+    uvm_analysis_imp_resp_exp #(resp_xtn, dut_scoreboard) m_resp_exp_imp;
+    uvm_tlm_analysis_fifo #(resp_xtn) m_resp_act_fifo;
+    uvm_tlm_analysis_fifo #(resp_xtn) m_resp_exp_fifo;
+
     // run_phase中为每个通道fork一个compare_loop
+    task run_phase(uvm_phase phase);
+        fork
+            csr_compare_loop();
+            ahb_compare_loop();
+            resp_compare_loop();
+        join_none
+    endtask
 endclass
+```
+
+### Response比较
+
+Response通道需完整比较status、opcode和rdata：
+
+```systemverilog
+function void compare_resp(resp_xtn act, resp_xtn exp);
+    bit match = 1;
+    string detail = "";
+    if (act.status !== exp.status) begin
+        match = 0; detail = {detail, $sformatf(" status:act=0x%02h exp=0x%02h", act.status, exp.status)};
+    end
+    if (act.opcode !== exp.opcode) begin
+        match = 0; detail = {detail, $sformatf(" opcode:act=0x%02h exp=0x%02h", act.opcode, exp.opcode)};
+    end
+    // 有读数据的响应需比较rdata
+    if (exp.has_rdata) begin
+        if (act.rdata.size() !== exp.rdata.size()) begin
+            match = 0; detail = {detail, $sformatf(" rdata_size:act=%0d exp=%0d", act.rdata.size(), exp.rdata.size())};
+        end else begin
+            foreach (exp.rdata[i])
+                if (act.rdata[i] !== exp.rdata[i]) begin
+                    match = 0; detail = {detail, $sformatf(" rdata[%0d]:act=0x%08h exp=0x%08h", i, act.rdata[i], exp.rdata[i])};
+                end
+        end
+    end
+    // 比较结果报告...
+endfunction
+```
+
+### Monitor对象隔离
+
+Monitor向多个analysis port发送事务时，必须为每个port创建独立的transaction副本，避免共享对象突变导致的竞态问题：
+
+```systemverilog
+// 错误做法：同一对象发给多个port
+m_req_ap.write(xtn);    // ref_model通过此port接收
+m_resp_ap.write(xtn);   // 同一对象再发一次，response字段可能覆盖request字段
+
+// 正确做法：为每个port创建独立副本
+req_xtn req_clone;
+resp_xtn resp_clone;
+
+req_clone = xtn.clone();  // 先发request副本
+m_req_ap.write(req_clone);
+
+// 然后在response阶段创建response对象
+resp_clone = resp_xtn::type_id::create("resp");
+resp_clone.copy_from(xtn);  // 复制公共字段
+resp_clone.status = captured_status;
+resp_clone.rdata  = captured_rdata;
+m_resp_ap.write(resp_clone);
 ```
 
 ---
 
 ## Monitor协议检查模式
 
-在monitor中添加协议检查逻辑，检测到违规时用uvm_error报告。
+**注意：接口时序/协议合规性检查由interface中的SVA断言负责（见SVA断言模式），Monitor不需要重复做信号级协议检查。** Monitor的职责是事务打包和事务级检查，仅处理SVA无法表达的多周期/跨事务协议违规。
 
-### SPI Monitor帧协议检查
+### Monitor与SVA断言的分工
 
-```systemverilog
-// 在monitor的采集逻辑中添加检查
-// 1. Turnaround检查: request结束到response开始之间应有1个clk_i周期pdo_oe=0
-if (req_end_cycle > 0 && pdo_oe_rise_cycle > 0) begin
-    int ta_cycles = pdo_oe_rise_cycle - req_end_cycle;
-    if (ta_cycles != 1) begin
-        `uvm_error(get_type_name(),
-            $sformatf("Frame protocol violation: turnaround=%0d cycles, expected 1", ta_cycles))
-    end
-end
+| 检查类型 | 实现位置 | 说明 |
+|---------|---------|------|
+| 单周期信号级检查 | interface SVA | 如：wr_en单周期脉冲、pdo_oe在idle时为0、hsize固定 |
+| 跨周期时序检查 | interface SVA | 如：复位后输出初始状态、rd_en后rdata延迟有效 |
+| 多周期/跨事务协议检查 | Monitor | 如：burst地址递增+4、turnaround周期计数、帧格式完整性 |
+| 数据正确性检查 | Scoreboard | 如：读数据比较、响应状态比较 |
 
-// 2. Burst连续性检查: burst响应期间pdo_oe应保持为1
-// 3. pcs_n时序检查: 帧期间pcs_n应保持0
-```
-
-### AHB Monitor协议检查
+Monitor中可添加的**事务级**协议检查（SVA难以表达的）：
 
 ```systemverilog
-// 在AHB monitor的采集逻辑中添加检查
-// 1. hsize固定检查
-if (m_vif.hsize !== 3'b010) begin
-    `uvm_error(get_type_name(), "AHB protocol: hsize must be WORD(010)")
-end
-
-// 2. haddr对齐检查
-if (m_vif.haddr[1:0] !== 2'b00) begin
-    `uvm_error(get_type_name(), "AHB protocol: haddr must be 4-byte aligned")
-end
-
-// 3. htrans序列检查: burst中第一拍应为NONSEQ，后续为SEQ
-// 4. hburst稳定性检查: burst期间hburst不应变化
-// 5. 地址递增检查: burst中地址应递增+4
-```
-
-### CSR Monitor时序检查
-
-```systemverilog
-// 1. wr_en/rd_en单周期脉冲检查
-if (csr_wr_en_prev && csr_wr_en_curr) begin
-    `uvm_error(get_type_name(), "CSR protocol: wr_en must be single-cycle pulse")
-end
-
-// 2. 读延迟检查: rd_en后下一周期应有rdata有效
-// 3. 地址范围检查
-if (csr_addr >= 64) begin
-    `uvm_error(get_type_name(), $sformatf("CSR protocol: addr 0x%02h out of range", csr_addr))
-end
+// SPI Monitor: burst响应期间pdo_oe保持检查（需要跨事务状态跟踪）
+// CSR Monitor: 连续写同一寄存器检测（事务级统计）
+// AHB Monitor: burst地址递增检查（复用VIP时VIP已包含此检查）
 ```
 
 ---
 
 ## SVA断言模式
 
-在tb.sv或interface中添加SVA断言，检查纯信号级行为。
+SVA断言放在**对应的interface文件**中，而非tb.sv中。每个interface负责承载该接口的时序/协议断言。复用VIP的接口（如yuu_ahb_interface）不需要添加断言，VIP自带完备检查。
 
-### 复位状态断言
+### SPI接口断言（spi_if.sv）
+
+在spi_if的clocking/modport声明之后，添加以下断言。**注意：断言失败时使用`uvm_error()`宏报告错误，而非`$error`，以便通过UVM报告系统统一管理。**
 
 ```systemverilog
-// 在tb.sv中，DUT例化后添加
-property p_reset_outputs;
-    @(posedge clk) !rst_n |=> (
-        dut.pdo_oe_o === 1'b0 &&
-        dut.htrans_o === 2'b00 &&
-        dut.csr_rd_en_o === 1'b0 &&
-        dut.csr_wr_en_o === 1'b0
-    );
-endproperty
-assert property(p_reset_outputs) else $error("[CHK_001] Reset state violation");
+// ---- SVA Assertions in spi_if ----
 
-property p_reset_pdo_zero;
-    @(posedge clk) !rst_n |=> dut.pdo_o === '0;
+// CHK_001: 复位后输出初始状态
+property p_rst_pdo_oe;
+    @(posedge clk_i) !rst_n_i |=> pdo_oe_o === 1'b0;
 endproperty
-assert property(p_reset_pdo_zero) else $error("[CHK_001] Reset pdo_o not zero");
+assert property(p_rst_pdo_oe) else
+    `uvm_error("CHK_001", "Reset: pdo_oe not 0 after reset")
+
+property p_rst_pdo_zero;
+    @(posedge clk_i) !rst_n_i |=> pdo_o === '0;
+endproperty
+assert property(p_rst_pdo_zero) else
+    `uvm_error("CHK_001", "Reset: pdo_o not 0 after reset")
+
+// CHK_002: 空闲状态检查 - pcs_n=1时pdo_oe=0且pdo_o不翻转
+property p_idle_pdo_oe_off;
+    @(posedge clk_i) rst_n_i && pcs_n_i === 1'b1 |-> pdo_oe_o === 1'b0;
+endproperty
+assert property(p_idle_pdo_oe_off) else
+    `uvm_error("CHK_002", "Idle: pdo_oe active when pcs_n=1")
+
+// CHK_003: 帧期间pcs_n保持低电平
+// (此检查需要跟踪帧状态，用sequence实现)
+sequence s_in_frame;
+    @(posedge clk_i) pcs_n_i === 1'b0 ##1 pcs_n_i === 1'b0;
+endsequence
+
+// CHK_004: pdo_oe仅在帧内有效
+property p_pdo_oe_only_in_frame;
+    @(posedge clk_i) rst_n_i && pcs_n_i === 1'b1 |-> pdo_oe_o === 1'b0;
+endproperty
+assert property(p_pdo_oe_only_in_frame) else
+    `uvm_error("CHK_004", "pdo_oe active outside frame")
+
+// CHK_005: turnaround周期检查
+// request结束后pdo_oe=0的周期数应符合LRS定义（通常1个周期）
+// 注意：此断言需要结合具体DUT的时序定义
+
+// CHK_006: burst连续性 - burst响应期间pdo_oe保持1
+// 注意：此断言需要跟踪burst状态，具体实现需结合LRS
 ```
 
-注意：这里引用DUT的port信号（如`dut.pdo_oe_o`）是允许的，因为这些都是DUT的port而非内部信号。但不要引用`dut.xxx.yyy`这样的层级路径。
+### CSR接口断言（csr_if.sv）
 
-### AHB固定属性断言
+在csr_if的clocking/modport声明之后，添加以下断言：
 
 ```systemverilog
-property p_ahb_hsize_word;
-    @(posedge clk) rst_n && dut.htrans_o != 2'b00 |-> dut.hsize_o === 3'b010;
+// ---- SVA Assertions in csr_if ----
+
+// CHK_010: 复位后CSR输出初始状态
+property p_rst_csr_idle;
+    @(posedge clk_i) !rst_n_i |=> csr_rd_en_o === 1'b0 && csr_wr_en_o === 1'b0;
 endproperty
-assert property(p_ahb_hsize_word) else $error("[CHK_015] AHB hsize not WORD");
+assert property(p_rst_csr_idle) else
+    `uvm_error("CHK_010", "Reset: CSR en not 0 after reset")
+
+// CHK_011: wr_en单周期脉冲
+property p_csr_wr_pulse;
+    @(posedge clk_i) rst_n_i && csr_wr_en_o === 1'b1 |=> csr_wr_en_o === 1'b0;
+endproperty
+assert property(p_csr_wr_pulse) else
+    `uvm_error("CHK_011", "CSR wr_en not single-cycle pulse")
+
+// CHK_012: rd_en单周期脉冲
+property p_csr_rd_pulse;
+    @(posedge clk_i) rst_n_i && csr_rd_en_o === 1'b1 |=> csr_rd_en_o === 1'b0;
+endproperty
+assert property(p_csr_rd_pulse) else
+    `uvm_error("CHK_012", "CSR rd_en not single-cycle pulse")
+
+// CHK_013: wr_en和rd_en互斥
+property p_csr_rw_excl;
+    @(posedge clk_i) rst_n_i |-> !(csr_wr_en_o === 1'b1 && csr_rd_en_o === 1'b1);
+endproperty
+assert property(p_csr_rw_excl) else
+    `uvm_error("CHK_013", "CSR wr_en and rd_en both active")
+
+// CHK_014: CSR地址范围检查
+property p_csr_addr_range;
+    @(posedge clk_i) rst_n_i && (csr_wr_en_o || csr_rd_en_o) |-> csr_addr_o < 8'h40;
+endproperty
+assert property(p_csr_addr_range) else
+    `uvm_error("CHK_014", $sformatf("CSR addr out of range: 0x%02h", $sampled(csr_addr_o)))
+
+// CHK_016: 读延迟 - rd_en后下一周期rdata有效
+property p_csr_rd_latency;
+    @(posedge clk_i) rst_n_i && csr_rd_en_o === 1'b1 |=> !$isunknown(csr_rdata_i);
+endproperty
+assert property(p_csr_rd_latency) else
+    `uvm_error("CHK_016", "CSR rdata not valid after rd_en")
+```
+
+### AHB接口断言
+
+复用VIP时（如yuu_ahb），VIP自带完备的AHB协议检查断言，不需要在TB中添加AHB断言。如果AHB接口是自建agent，则在ahb_if.sv中添加类似以下断言：
+
+```systemverilog
+// AHB固定属性（仅自建AHB agent时需要，复用VIP时跳过）
+property p_ahb_hsize_word;
+    @(posedge clk_i) rst_n_i && htrans_o != 2'b00 |-> hsize_o === 3'b010;
+endproperty
+assert property(p_ahb_hsize_word) else
+    `uvm_error("CHK_015", "AHB hsize not WORD")
 
 property p_ahb_addr_aligned;
-    @(posedge clk) rst_n && dut.htrans_o != 2'b00 |-> dut.haddr_o[1:0] === 2'b00;
+    @(posedge clk_i) rst_n_i && htrans_o != 2'b00 |-> haddr_o[1:0] === 2'b00;
 endproperty
-assert property(p_ahb_addr_aligned) else $error("[CHK_015] AHB addr not aligned");
+assert property(p_ahb_addr_aligned) else
+    `uvm_error("CHK_015", "AHB addr not aligned")
 ```
 
-### 空闲行为断言
+### 断言编写原则
 
-```systemverilog
-property p_idle_no_rx_update;
-    @(posedge clk) rst_n && dut.pcs_n_i === 1'b1 |-> 1; // RX不更新（需结合具体信号）
-endproperty
-```
+1. **断言只使用interface内声明的信号**：不引用DUT内部信号（如dut.xxx.yyy）或跨interface信号
+2. **每个断言关联一个checker ID**：用$error中的[CHK_xxx]标签与RTM Checker List对应
+3. **复位条件必须包含**：大部分断言需在rst_n_i有效时才检查，避免复位期间误报
+4. **基于LRS/HLD的时序参数**：turnaround周期数、读延迟等具体参数需从LRS/HLD文档中获取，不应硬编码猜测
+5. **覆盖所有RTM checker**：RTM中归类为SVA的每个checker必须至少有一个对应的assert property
 
 ---
 
